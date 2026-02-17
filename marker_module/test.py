@@ -1,4 +1,4 @@
-from marker_manager import MarkerManager
+from .marker_manager import MarkerManager
 from pdf2image import convert_from_path
 from pathlib import Path
 from PIL import Image
@@ -18,9 +18,10 @@ result = manager.mark_exam(
     pages=pages
 )
 print(result)'''
+script_dir = Path(__file__).parent.absolute()
 
-img1 = Image.open("0.jpg")
-img2 = Image.open("2.jpg")
+img1 = Image.open(script_dir / "0.jpg")
+# img2 = Image.open("2.jpg")
 pages = [img1]
 manager = MarkerManager()
 result = manager.scan_submission(

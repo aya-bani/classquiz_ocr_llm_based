@@ -17,7 +17,6 @@ class CoordinateMapper:
         Calculate the center positions of the 4 markers in the original document.
         
         Args:
-
         
         Returns:
             Dictionary with marker positions for each corner

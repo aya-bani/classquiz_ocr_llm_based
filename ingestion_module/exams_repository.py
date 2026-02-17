@@ -26,7 +26,7 @@ class ExamsRepository:
             self._local.conn.commit()
         except Exception as e:
             self._local.conn.rollback()
-            raise e
+            raise e   
         finally:
             cursor.close()
     

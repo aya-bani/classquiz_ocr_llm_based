@@ -15,6 +15,14 @@ class MarkerGenerator:
         self.logger.info("MarkerGenerator initialized")
 
     def calculate_markers(self, exam_id: int, page_number: int) -> list:
+        """Return the four marker IDs for a given exam page.
+
+        The first three IDs are fixed constants defined in
+        :class:`MarkerConfig.FIXED_MARKER_IDS`.  A fourth, unique ID is
+        generated using the previous block-based scheme so that every page of
+        every exam gets a distinct value.
+        """
+        # validate inputs first
         if not (0 <= page_number < MarkerConfig.PAGES_PER_EXAM):
             self.logger.error(f"Invalid page_number {page_number}")
             raise ValueError(f"page_number must be between 0 and {MarkerConfig.PAGES_PER_EXAM - 1}")
@@ -26,15 +34,23 @@ class MarkerGenerator:
                 f"Current dictionary supports only {MarkerConfig.MAX_EXAMS} exams."
             )
 
+        # compute dynamic fourth ID using the original scheme; it will always
+        # be greater than the fixed values and unique per page.
         base = exam_id * MarkerConfig.BLOCK_SIZE + page_number * MarkerConfig.CORNERS_PER_PAGE
-        marker_ids = [base + i for i in range(MarkerConfig.CORNERS_PER_PAGE)]
+        fourth_id = base + (MarkerConfig.CORNERS_PER_PAGE - 1)
 
-        if marker_ids[-1] > MarkerConfig.MAX_MARKER_ID:
-            self.logger.error(f"Marker ID {marker_ids[-1]} exceeds dictionary capacity")
+        fixed = MarkerConfig.FIXED_MARKER_IDS
+        if any(fid > MarkerConfig.MAX_MARKER_ID for fid in fixed):
+            self.logger.error("One of the fixed marker IDs exceeds dictionary capacity")
+            raise ValueError("Fixed marker IDs must be within dictionary capacity")
+
+        if fourth_id > MarkerConfig.MAX_MARKER_ID:
+            self.logger.error(f"Marker ID {fourth_id} exceeds dictionary capacity")
             raise ValueError(
-                f"Generated marker ID {marker_ids[-1]} exceeds dictionary capacity {MarkerConfig.MAX_MARKER_ID}"
+                f"Generated marker ID {fourth_id} exceeds dictionary capacity {MarkerConfig.MAX_MARKER_ID}"
             )
 
+        marker_ids = fixed + [fourth_id]
         self.logger.debug(f"Marker IDs for exam {exam_id}, page {page_number}: {marker_ids}")
         return marker_ids
 

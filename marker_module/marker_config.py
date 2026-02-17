@@ -21,6 +21,12 @@ class MarkerConfig:
     CORNERS_PER_PAGE = 4
     BLOCK_SIZE = PAGES_PER_EXAM * CORNERS_PER_PAGE  
     CORNER_NAMES = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
+
+    # first three markers are always the same across all pages/exams; the
+    # generator will only compute a unique fourth ID per page.  These values
+    # must fall within the dictionary’s capacity.
+    FIXED_MARKER_IDS = [0, 1, 2]
+
     MAX_EXAMS = (MAX_MARKER_ID + 1) // BLOCK_SIZE  
 
 

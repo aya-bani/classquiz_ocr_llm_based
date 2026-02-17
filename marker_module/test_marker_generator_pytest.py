@@ -13,15 +13,20 @@ def generator():
 
 
 def test_calculate_markers_basic(generator):
+    # first three IDs must always equal the fixed constants
     ids = generator.calculate_markers(0, 0)
-    assert ids == [0, 1, 2, 3]
+    assert ids[:3] == MarkerConfig.FIXED_MARKER_IDS
+    # fourth ID should follow the old formula for exam 0 page 0
+    assert ids[3] == 3
 
-    # changing exam and page offsets the base value
+    # different exam still uses same fixed values
     ids2 = generator.calculate_markers(1, 0)
-    assert ids2[0] == MarkerConfig.BLOCK_SIZE
+    assert ids2[:3] == MarkerConfig.FIXED_MARKER_IDS
+    expected_fourth = 1 * MarkerConfig.BLOCK_SIZE + (MarkerConfig.CORNERS_PER_PAGE - 1)
+    assert ids2[3] == expected_fourth
     assert len(ids2) == MarkerConfig.CORNERS_PER_PAGE
 
-    # last valid page/exam combination should not raise
+    # last valid page/exam combination should not raise an error
     max_exam = MarkerConfig.MAX_EXAMS - 1
     max_page = MarkerConfig.PAGES_PER_EXAM - 1
     _ = generator.calculate_markers(max_exam, max_page)
@@ -66,8 +71,9 @@ def test_add_markers_to_page_effect(generator):
 
 
 def test_get_exam_marker_range(generator):
+    # range should still include the fixed identifiers and the dynamic block
     first, last = generator.get_exam_marker_range(0)
-    assert first == 0
+    assert first == min(MarkerConfig.FIXED_MARKER_IDS)
     assert last == MarkerConfig.BLOCK_SIZE - 1
 
     with pytest.raises(ValueError):

@@ -1,0 +1,36 @@
+# Path of the repository you want to convert
+repo_path: ./
+
+# Where pyragify will write the txt output
+output_dir: C:/Users/ayaba/Documents/classquiz pfe
+
+# Maximum number of words per chunk file
+# (increase for large repos)
+max_words: 200000
+
+# Maximum size of a file to process (in bytes, e.g., 10 MB)
+max_file_size: 10485760
+
+# Patterns of files to skip (wildcards)
+# e.g. log, lock, binary files, compiled files
+skip_patterns:
+  - "*.log"
+  - "*.tmp"
+  - "*.lock"
+  - "*.pyc"
+
+# List of directories to skip
+skip_dirs:
+  - "__pycache__"
+  - "*.pyc"
+  - ".env"
+  - ".venv"
+  - "*.log"
+  - "data"
+  - "*.json"
+  - "ingestion_module/Exams"
+  - "ingestion_module/Exams_copy"
+  - "agents_module/exam_20"
+
+# Optional: Enable detailed logging
+verbose: false

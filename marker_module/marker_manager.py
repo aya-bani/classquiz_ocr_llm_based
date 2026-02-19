@@ -21,7 +21,6 @@ class MarkerManager:
         self.logger.info("MarkerManager initialized with provided configuration")
         self.marker_generator = MarkerGenerator()
 
-
     def mark_exam(self, exam_id: int, exam_path:Path) -> dict:
         """
         Add ArUco markers to exam pages and save to PDF.
@@ -86,6 +85,7 @@ class MarkerManager:
             })
         
         return results
+    
     def _save_pages_to_pdf(self, processed_pages: list, exam_id: int, submission_id: int = None):
         """Save all processed pages to a single PDF file"""
         if not processed_pages:

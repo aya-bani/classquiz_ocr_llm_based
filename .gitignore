@@ -7,3 +7,4 @@ data
 ingestion_module/Exams
 ingestion_module/Exams_copy
 agents_module/exam_20
+marker_module/marked_output

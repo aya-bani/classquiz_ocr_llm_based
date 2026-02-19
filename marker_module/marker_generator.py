@@ -8,7 +8,6 @@ from logger_manager import LoggerManager
 class MarkerGenerator:
     """Generates and places ArUco markers on exam pages."""
 
-
     def __init__(self):
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(MarkerConfig.DICT_TYPE)
         self.logger = LoggerManager.get_logger(__name__)
@@ -34,10 +33,15 @@ class MarkerGenerator:
                 f"Current dictionary supports only {MarkerConfig.MAX_EXAMS} exams."
             )
 
-        # compute dynamic fourth ID using the original scheme; it will always
-        # be greater than the fixed values and unique per page.
-        base = exam_id * MarkerConfig.BLOCK_SIZE + page_number * MarkerConfig.CORNERS_PER_PAGE
-        fourth_id = base + (MarkerConfig.CORNERS_PER_PAGE - 1)
+        # Compute dynamic fourth marker ID for this specific page.
+        # Strategy: Reserve IDs sequentially after the 3 fixed markers.
+        # Each exam block occupies PAGES_PER_EXAM consecutive slots.
+        # Formula: first_dynamic_id (3) + exam_offset (exam_id * 5) + page_offset (page_number)
+        # Example: exam_id=0, page=0 → 3 + 0 + 0 = 3
+        #          exam_id=1, page=2 → 3 + 5 + 2 = 10
+        # This ensures no ID overlap and uses the minimum required ID space.
+        first_dynamic_id = max(MarkerConfig.FIXED_MARKER_IDS) + 1
+        fourth_id = first_dynamic_id + exam_id * MarkerConfig.PAGES_PER_EXAM + page_number
 
         fixed = MarkerConfig.FIXED_MARKER_IDS
         if any(fid > MarkerConfig.MAX_MARKER_ID for fid in fixed):
@@ -103,7 +107,6 @@ class MarkerGenerator:
         self.logger.debug(f"Marker range for exam {exam_id}: {first}-{last}")
         return (first, last)
     
-
     def generate_marked_exam(self, exam_id: int,  pages: list[Image.Image]) -> list[Image.Image]:
         """Generate markers for all pages of a given exam"""
         self.logger.info(f"Generating markers for exam_id={exam_id}")

@@ -3,8 +3,8 @@ from cv2.aruco import DICT_7X7_1000
 from logger_manager import LoggerManager
 
 
-
 class MarkerConfig:
+
     """Configuration for layout module"""
     
     # File storage paths
@@ -17,9 +17,11 @@ class MarkerConfig:
     MARKER_SIZE = 90
     MARGIN = 20
     MAX_MARKER_ID = 999
-    PAGES_PER_EXAM = 9
+    PAGES_PER_EXAM = 5
     CORNERS_PER_PAGE = 4
-    BLOCK_SIZE = PAGES_PER_EXAM * CORNERS_PER_PAGE  
+    # BLOCK_SIZE: Each exam uses 5 unique dynamic marker IDs maximum (one per page) + 3 fixed IDs.
+    # Only the fourth corner varies per page; the first three are shared globally.
+    BLOCK_SIZE = PAGES_PER_EXAM + 3  # 5 + 3 = 8 unique IDs per exam
     CORNER_NAMES = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
 
     # first three markers are always the same across all pages/exams; the
@@ -28,13 +30,9 @@ class MarkerConfig:
     FIXED_MARKER_IDS = [0, 1, 2]
 
     MAX_EXAMS = (MAX_MARKER_ID + 1) // BLOCK_SIZE  
-
-
-    #coordinate mapper parameters
+    # coordinate mapper parameters
     DOC_WIDTH = 1654
     DOC_HEIGHT = 2338
-
-
 
     @classmethod
     def create_directories(cls):

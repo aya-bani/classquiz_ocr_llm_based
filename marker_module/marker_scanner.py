@@ -5,7 +5,9 @@ from .marker_config import MarkerConfig
 from logger_manager import LoggerManager
 from PIL import Image
 
+
 class ExamScanner:
+
     """
     Stateless exam page scanner that identifies exam and page numbers using ArUco markers.
     """
@@ -29,9 +31,11 @@ class ExamScanner:
                 - error: Optional[str]
                 - detected_markers: List[Dict]
         """
+
         cls.logger.debug("Scanning page")
 
         #gray = cls._convert_to_grayscale(image)
+
         corners, ids = cls._detect_markers(image)
 
         if ids is None or len(ids) == 0:
@@ -148,18 +152,42 @@ class ExamScanner:
         """
         Decode a marker ID into exam ID, page number, and corner position.
         
+        The fourth (dynamic) marker is calculated as:
+            fourth_id = 3 + (exam_id * PAGES_PER_EXAM) + page_number
+        
+        To decode, we reverse the formula:
+            id_offset = marker_id - 3
+            exam_id = id_offset // PAGES_PER_EXAM
+            page_number = id_offset % PAGES_PER_EXAM
+        
+        The fixed markers (0, 1, 2) are just corner indicators and use their
+        ID directly as the corner position.
+        
         Args:
-            marker_id: Integer marker ID
+            marker_id: Integer marker ID (0-999)
             
         Returns:
             Tuple of (exam_id, page_number, corner_name)
+            
+        Examples:
+            marker_id=0  → (dummy, dummy, 'top_left')      # Fixed marker
+            marker_id=14 → (2, 1, 'bottom_right')          # Dynamic: exam 2, page 1
         """
-        exam_id = marker_id // MarkerConfig.BLOCK_SIZE
-        remainder = marker_id % MarkerConfig.BLOCK_SIZE
-
-        page_number = remainder // MarkerConfig.CORNERS_PER_PAGE
-        corner_id = remainder % MarkerConfig.CORNERS_PER_PAGE
-
+        first_dynamic = max(MarkerConfig.FIXED_MARKER_IDS) + 1  
+        
+        if marker_id < first_dynamic:
+            # Fixed marker (0, 1, 2) - corner indicator only
+            # Use marker_id directly as corner position
+            exam_id = 0  # Dummy value for fixed markers
+            page_number = 0  # Dummy value for fixed markers
+            corner_id = marker_id
+        else:
+            # Dynamic marker - extract exam_id and page_number
+            id_offset = marker_id - first_dynamic
+            exam_id = id_offset // MarkerConfig.PAGES_PER_EXAM
+            page_number = id_offset % MarkerConfig.PAGES_PER_EXAM
+            corner_id = 3  # Dynamic markers are always at the fourth corner
+        
         corner_names = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
         return exam_id, page_number, corner_names[corner_id]
 

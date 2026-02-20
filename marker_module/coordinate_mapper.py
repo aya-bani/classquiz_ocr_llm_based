@@ -167,6 +167,7 @@ class CoordinateMapper:
             
         Returns:
             Tuple (img_x, img_y) or None if transformation fails
+
         """
         if homography_matrix is None:
             return None
@@ -245,6 +246,7 @@ class CoordinateMapper:
         extracted_document_rgb = cv2.cvtColor(extracted_document, cv2.COLOR_BGR2RGB)
         
         return Image.fromarray(extracted_document_rgb)
+    
     @staticmethod
     def get_scale_factors(homography_matrix: np.ndarray) -> Optional[Dict[str, float]]:
         """

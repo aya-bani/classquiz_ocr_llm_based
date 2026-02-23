@@ -59,5 +59,25 @@ class ImageCropping:
     
     def _load_pdf(self, pdf_path:Path) -> tuple:
         """Load PDF file and return list of pages"""
-        pages = convert_from_path(pdf_path, dpi=300)
-        return pages
+        try:
+            pages = convert_from_path(pdf_path, dpi=300)
+            return pages
+        except Exception:
+            # Fallback to PyMuPDF if poppler/pdf2image is not available
+            try:
+                import fitz
+                from PIL import Image
+
+                doc = fitz.open(str(pdf_path))
+                pages = []
+                for page in doc:
+                    pix = page.get_pixmap(dpi=300)
+                    mode = "RGBA" if pix.alpha else "RGB"
+                    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+                    if mode == "RGBA":
+                        img = img.convert("RGB")
+                    pages.append(img)
+                return pages
+            except Exception as e:
+                self.logger.exception("Failed to load PDF pages with both pdf2image and PyMuPDF")
+                raise

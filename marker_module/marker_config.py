@@ -14,8 +14,8 @@ class MarkerConfig:
 
     # Generator parameters
     DICT_TYPE = DICT_7X7_1000
-    MARKER_SIZE = 90
-    MARGIN = 20
+    MARKER_SIZE = 60
+    MARGIN = 24
     MAX_MARKER_ID = 999
     PAGES_PER_EXAM = 5
     CORNERS_PER_PAGE = 4

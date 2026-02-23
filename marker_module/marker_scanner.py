@@ -19,6 +19,22 @@ class ExamScanner:
         """
         Scan a single page for ArUco markers and extract exam/page information.
         
+        Implements the full 7-step workflow:
+        1. Input image
+        2. Preprocess the image (grayscale, denoise, enhance contrast)
+        3. Perform strict ArUco marker detection using predefined dictionary
+        4. If fewer than 4 markers are detected:
+           → Switch to a more lenient detection mode
+        5. If markers are still incomplete:
+           → Apply geometric inference to estimate missing markers
+           → Use parallelogram-based corner estimation
+        6. If at least 2 markers are detected:
+           → Estimate the paper region from detected markers
+           → Apply perspective transformation to straighten the page
+           → Re-run marker detection on the warped image for better accuracy
+        7. Return final structured output:
+           - exam_id, page_number, detected_markers, paper_corners, success flag
+        
         Args:
             image: Input image as numpy array (BGR or grayscale)
             
@@ -28,76 +44,120 @@ class ExamScanner:
                 - exam_id: Optional[int]
                 - page_number: Optional[int]
                 - markers_found: int
-                - error: Optional[str]
+                - dynamic_markers_found: int
+                - fixed_markers_found: int
                 - detected_markers: List[Dict]
+                - paper_corners: Optional[np.ndarray]
+                - warped_markers: Optional[List[Dict]]
+                - error: Optional[str]
         """
+        cls.logger.debug("Starting full scan workflow")
 
-        cls.logger.debug("Scanning page")
+        # Step 1-2: Input & Preprocess
+        preprocessed = cls._preprocess_image(image)
 
-        #gray = cls._convert_to_grayscale(image)
+        # Step 3-4: Detection with fallback strategy (strict → lenient)
+        corners, ids = cls._detect_markers_with_fallback(image, preprocessed)
+        cls.logger.debug(f"Step 3-4: Detection found {len(ids) if ids is not None else 0} markers")
 
-        corners, ids = cls._detect_markers(image)
-
+        # No markers at all = failure
         if ids is None or len(ids) == 0:
             return cls._create_error_result("No markers detected", 0)
 
-        detected_markers, exam_ids, page_numbers = cls._process_markers(ids)
+        # Process detected markers with corner data
+        detected_markers, corners_list, exam_ids, page_numbers = cls._process_markers_with_corners(ids, corners)
+        cls.logger.debug(f"Processed {len(detected_markers)} markers")
 
-        # Separate dynamic markers (which encode exam_id + page_number) from fixed markers
-        dynamic_markers = [m for m in detected_markers if m['marker_id'] >= max(MarkerConfig.FIXED_MARKER_IDS) + 1]
-        fixed_markers = [m for m in detected_markers if m['marker_id'] < max(MarkerConfig.FIXED_MARKER_IDS) + 1]
-        
-        cls.logger.debug(f"Detected {len(dynamic_markers)} dynamic + {len(fixed_markers)} fixed markers")
+        # Step 5: Geometric inference if incomplete
+        inferred_marker = None
+        if len(detected_markers) < 4 and len(detected_markers) >= 3:
+            cls.logger.debug("Step 5: Attempting geometric inference")
+            inferred = cls._infer_missing_corner(detected_markers, corners_list)
+            if inferred is not None:
+                missing_corner, inferred_corner_array = inferred
+                detected_markers.append({
+                    'marker_id': -1,
+                    'exam_id': next(iter(exam_ids)) if exam_ids else 0,
+                    'page_number': next(iter(page_numbers)) if page_numbers else 0,
+                    'corner': missing_corner,
+                    'inferred': True
+                })
+                corners_list.append(inferred_corner_array)
+                inferred_marker = missing_corner
+                cls.logger.debug(f"Step 5: Inferred corner {missing_corner}")
 
-        # Extract exam/page from dynamic markers only (fixed ones return dummy 0,0)
+        # Validate exam/page consistency from real markers
+        dynamic_markers = [m for m in detected_markers if 'inferred' not in m]
         dynamic_exam_ids = {m['exam_id'] for m in dynamic_markers}
         dynamic_page_numbers = {m['page_number'] for m in dynamic_markers}
 
-        # Validate single exam ID from dynamic markers
         if len(dynamic_exam_ids) > 1:
-            cls.logger.error(f"Multiple exam IDs detected in dynamic markers: {dynamic_exam_ids}")
+            cls.logger.error(f"Multiple exam IDs detected: {dynamic_exam_ids}")
             return cls._create_error_result(
                 f'Multiple exam IDs detected: {dynamic_exam_ids}',
-                len(ids),
+                len(detected_markers),
                 detected_markers
             )
 
-        # Validate single page number from dynamic markers
         if len(dynamic_page_numbers) > 1:
-            cls.logger.error(f"Multiple page numbers detected in dynamic markers: {dynamic_page_numbers}")
+            cls.logger.error(f"Multiple page numbers detected: {dynamic_page_numbers}")
             return cls._create_error_result(
                 f'Multiple page numbers detected: {dynamic_page_numbers}',
-                len(ids),
+                len(detected_markers),
                 detected_markers,
                 exam_id=next(iter(dynamic_exam_ids)) if dynamic_exam_ids else None
             )
 
-        # At least one dynamic marker must be present
         if not dynamic_exam_ids or not dynamic_page_numbers:
-            cls.logger.error("No dynamic markers detected (critical for exam identification)")
+            cls.logger.error("No valid exam ID or page number decoded from markers")
             return cls._create_error_result(
-                "No dynamic markers detected. Cannot identify exam/page.",
-                len(ids),
+                "Could not decode valid exam ID or page number from detected markers",
+                len(detected_markers),
                 detected_markers
             )
 
         exam_id = next(iter(dynamic_exam_ids))
         page_number = next(iter(dynamic_page_numbers))
-        
-        cls.logger.info(f"Scan success exam={exam_id} page={page_number} (found {len(dynamic_markers)} dynamic + {len(fixed_markers)} fixed markers)")
 
-        return {
+        # Step 6: Perspective warping + re-detection if at least 2 markers
+        warped_markers = None
+        paper_corners = None
+        if len(detected_markers) >= 2:
+            cls.logger.debug("Step 6: Estimating paper region and applying perspective transform")
+            paper_corners = cls._estimate_paper_region(detected_markers, corners_list)
+            if paper_corners is not None:
+                warped_image = cls._apply_perspective_transform(image, paper_corners)
+                if warped_image is not None:
+                    # Re-run detection on warped image
+                    warped_preprocessed = cls._preprocess_image(warped_image)
+                    re_corners, re_ids = cls._detect_markers_with_fallback(warped_image, warped_preprocessed)
+                    
+                    if re_ids is not None and len(re_ids) > 0:
+                        warped_markers, _, _, _ = cls._process_markers_with_corners(re_ids, re_corners)
+                        cls.logger.debug(f"Step 6: Re-detection found {len(warped_markers)} markers on warped image")
+
+        # Step 7: Return final structured output
+        result = {
             'success': True,
             'exam_id': exam_id,
             'page_number': page_number,
-            'markers_found': len(ids),
-            'dynamic_markers_found': len(dynamic_markers),
-            'fixed_markers_found': len(fixed_markers),
+            'markers_found': len(detected_markers),
+            'dynamic_markers_found': len([m for m in detected_markers if 'inferred' not in m]),
+            'fixed_markers_found': len([m for m in detected_markers if 'inferred' not in m and m.get('marker_id', 0) < 3]),
             'expected_markers': MarkerConfig.CORNERS_PER_PAGE,
             'detected_markers': detected_markers,
-            'corners': corners,
-            'all_corners_detected': len(ids) == MarkerConfig.CORNERS_PER_PAGE
+            'paper_corners': paper_corners,
+            'warped_markers': warped_markers,
+            'inferred_corner': inferred_marker,
+            'all_corners_detected': len(detected_markers) == MarkerConfig.CORNERS_PER_PAGE
         }
+        
+        cls.logger.info(
+            f"Scan success exam={exam_id} page={page_number} "
+            f"(found {len(detected_markers)} markers, inferred={inferred_marker is not None})"
+        )
+        
+        return result
 
     @classmethod
     def _preprocess_image(cls, image: np.ndarray) -> np.ndarray:
@@ -131,17 +191,37 @@ class ExamScanner:
         return sharpened
 
     @classmethod
-    def _detect_markers(cls, image: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
+    def _detect_markers_strict(cls, image: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
+        """Detect ArUco markers with strict parameters."""
+        aruco_dict = cv2.aruco.getPredefinedDictionary(MarkerConfig.DICT_TYPE)
+        params = cv2.aruco.DetectorParameters()
+        detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+        corners, ids, _ = detector.detectMarkers(image)
+        return corners, ids
+
+    @classmethod
+    def _detect_markers_lenient(cls, image: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
+        """Detect ArUco markers with lenient parameters."""
+        aruco_dict = cv2.aruco.getPredefinedDictionary(MarkerConfig.DICT_TYPE)
+        params = cv2.aruco.DetectorParameters()
+        params.adaptiveThreshConstant = 5
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 23
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        params.polygonalApproxAccuracyRate = 0.03
+        detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+        corners, ids, _ = detector.detectMarkers(image)
+        return corners, ids
+
+    @classmethod
+    def _detect_markers_with_fallback(cls, image: np.ndarray, preprocessed: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
         """
-        Detect ArUco markers with multiple strategies.
+        Detect markers with multi-strategy fallback (Step 3-4 combined).
         
-        Tries multiple strategies and returns the best result 
-        (prioritizing detections that include a dynamic marker).
-        
-        Returns: (corners, ids) tuple
+        Tries: raw_strict → prep_strict → prep_lenient → prep_very_lenient
+        Prioritizes detections that include dynamic markers.
         """
         aruco_dict = cv2.aruco.getPredefinedDictionary(MarkerConfig.DICT_TYPE)
-        preprocessed = cls._preprocess_image(image)
         
         strategies = [
             ("raw_strict", image, lambda: cv2.aruco.DetectorParameters()),
@@ -209,7 +289,7 @@ class ExamScanner:
 
     @classmethod
     def _process_markers(cls, ids: np.ndarray) -> Tuple[List[Dict], set, set]:
-        """Process detected marker IDs and extract exam/page information."""
+        """Process detected marker IDs and extract exam/page information (legacy)."""
         detected_markers = []
         exam_ids = set()
         page_numbers = set()
@@ -227,6 +307,38 @@ class ExamScanner:
             })
 
         return detected_markers, exam_ids, page_numbers
+
+    @classmethod
+    def _process_markers_with_corners(
+        cls, 
+        ids: np.ndarray, 
+        corners: List
+    ) -> Tuple[List[Dict], List[np.ndarray], set, set]:
+        """
+        Process detected marker IDs with their corner coordinates.
+        
+        Returns:
+            (detected_markers, corners_list, exam_ids, page_numbers)
+        """
+        detected_markers = []
+        corners_list = []
+        exam_ids = set()
+        page_numbers = set()
+
+        for i, marker_id in enumerate(ids.flatten()):
+            exam_id, page_num, corner = cls.decode_marker(int(marker_id))
+            exam_ids.add(exam_id)
+            page_numbers.add(page_num)
+
+            detected_markers.append({
+                'marker_id': int(marker_id),
+                'exam_id': exam_id,
+                'page_number': page_num,
+                'corner': corner
+            })
+            corners_list.append(corners[i])
+
+        return detected_markers, corners_list, exam_ids, page_numbers
 
     @classmethod
     def _create_error_result(
@@ -340,7 +452,7 @@ class ExamScanner:
         return img_array
 
     @classmethod
-    def infer_missing_corner(
+    def _infer_missing_corner(
         cls, 
         detected_markers: List[Dict], 
         corners_data: List[np.ndarray]
@@ -361,7 +473,7 @@ class ExamScanner:
         if len(detected_markers) != 3:
             return None
         
-        corner_names = MarkerConfig.CORNER_NAMES  # ['top_left', 'top_right', 'bottom_left', 'bottom_right']
+        corner_names = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
         detected_corners = {m['corner']: corners_data[i][0] for i, m in enumerate(detected_markers)}
         missing = [c for c in corner_names if c not in detected_corners]
         
@@ -370,42 +482,153 @@ class ExamScanner:
         
         missing_corner = missing[0]
         
-        # Use vector parallelogram: if A, B, C known and D missing, D ≈ A + C - B
-        # Pick the opposite corner pairs smartly
         try:
             corners = detected_corners
             
             if missing_corner == 'bottom_right':
-                # D = TL + BR_estimate where BR_estimate ≈ TR + BL - TL
-                tl = corners.get('top_left', corners.get('bottom_left'))
-                tr = corners.get('top_right', corners.get('top_left'))
-                bl = corners.get('bottom_left', corners.get('top_left'))
-                inferred = tr + bl - tl
+                tl = corners.get('top_left')
+                tr = corners.get('top_right')
+                bl = corners.get('bottom_left')
+                if tl is not None and tr is not None and bl is not None:
+                    inferred = tr + bl - tl
+                else:
+                    return None
             elif missing_corner == 'bottom_left':
-                # Similar logic
-                tl = corners.get('top_left', corners.get('top_right'))
-                tr = corners.get('top_right', corners.get('bottom_right'))
-                br = corners.get('bottom_right', corners.get('top_right'))
-                inferred = tl + br - tr
+                tl = corners.get('top_left')
+                tr = corners.get('top_right')
+                br = corners.get('bottom_right')
+                if tl is not None and tr is not None and br is not None:
+                    inferred = tl + br - tr
+                else:
+                    return None
             elif missing_corner == 'top_right':
-                tl = corners.get('top_left', corners.get('bottom_right'))
-                bl = corners.get('bottom_left', corners.get('top_left'))
-                br = corners.get('bottom_right', corners.get('bottom_left'))
-                inferred = tl + br - bl
+                tl = corners.get('top_left')
+                bl = corners.get('bottom_left')
+                br = corners.get('bottom_right')
+                if tl is not None and bl is not None and br is not None:
+                    inferred = tl + br - bl
+                else:
+                    return None
             elif missing_corner == 'top_left':
-                tr = corners.get('top_right', corners.get('bottom_left'))
-                bl = corners.get('bottom_left', corners.get('bottom_right'))
-                br = corners.get('bottom_right', corners.get('top_right'))
-                inferred = tr + bl - br
+                tr = corners.get('top_right')
+                bl = corners.get('bottom_left')
+                br = corners.get('bottom_right')
+                if tr is not None and bl is not None and br is not None:
+                    inferred = tr + bl - br
+                else:
+                    return None
             else:
                 return None
             
-            # Create corners array in shape (4, 2)
-            inferred_corners = np.array([inferred], dtype=np.float32)
+            # Create corners array in shape (1, 4, 2) to match ArUco output format
+            inferred_corners = np.array([[inferred]], dtype=np.float32)
             cls.logger.debug(f"Inferred {missing_corner} corner: {inferred}")
             return (missing_corner, inferred_corners)
         except Exception as e:
             cls.logger.warning(f"Failed to infer missing corner {missing_corner}: {e}")
+            return None
+
+    @classmethod
+    def _estimate_paper_region(
+        cls, 
+        detected_markers: List[Dict], 
+        corners_data: List[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """
+        Estimate the four corners of the paper region from detected markers.
+        
+        Maps marker corners to paper corners:
+        - top_left marker → top_left paper corner
+        - top_right marker → top_right paper corner
+        - bottom_left marker → bottom_left paper corner
+        - bottom_right marker → bottom_right paper corner
+        
+        Args:
+            detected_markers: List of marker dicts with 'corner' field
+            corners_data: List of corner coordinate arrays
+            
+        Returns:
+            4x2 numpy array of paper corners [TL, TR, BL, BR] or None if insufficient markers
+        """
+        if len(detected_markers) < 2:
+            return None
+        
+        corner_map = {}
+        for i, marker in enumerate(detected_markers):
+            if 'inferred' in marker:
+                continue  # Only use real markers for region estimation
+            corner_name = marker['corner']
+            corner_coords = corners_data[i][0]
+            corner_map[corner_name] = corner_coords
+        
+        corner_names = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
+        
+        # Extract available corners
+        paper_corners = []
+        for corner_name in corner_names:
+            if corner_name in corner_map:
+                paper_corners.append(corner_map[corner_name])
+            else:
+                # If missing, try to infer from others
+                available = {k: v for k, v in corner_map.items()}
+                if len(available) == 3:
+                    missing = [c for c in corner_names if c not in available][0]
+                    if missing == 'bottom_right':
+                        inferred = available.get('top_left') + available.get('bottom_left') - available.get('top_right')
+                    elif missing == 'bottom_left':
+                        inferred = available.get('top_left') + available.get('bottom_right') - available.get('top_right')
+                    elif missing == 'top_right':
+                        inferred = available.get('top_left') + available.get('bottom_right') - available.get('bottom_left')
+                    elif missing == 'top_left':
+                        inferred = available.get('top_right') + available.get('bottom_left') - available.get('bottom_right')
+                    else:
+                        return None
+                    paper_corners.append(inferred)
+                else:
+                    # Not enough corners to estimate
+                    return None
+        
+        return np.array(paper_corners, dtype=np.float32)
+
+    @classmethod
+    def _apply_perspective_transform(
+        cls, 
+        image: np.ndarray, 
+        paper_corners: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """
+        Apply perspective transformation to straighten the page.
+        
+        Args:
+            image: Input image
+            paper_corners: 4x2 array of paper corners in order [TL, TR, BL, BR]
+            
+        Returns:
+            Warped image or None on failure
+        """
+        if paper_corners.shape != (4, 2):
+            cls.logger.warning(f"Invalid paper_corners shape: {paper_corners.shape}")
+            return None
+        
+        try:
+            # Define destination corners (preserving image dimensions)
+            height, width = image.shape[:2]
+            dest_corners = np.array([
+                [0, 0],
+                [width, 0],
+                [0, height],
+                [width, height]
+            ], dtype=np.float32)
+            
+            # Get perspective transform matrix
+            M = cv2.getPerspectiveTransform(paper_corners, dest_corners)
+            
+            # Apply transformation
+            warped = cv2.warpPerspective(image, M, (width, height))
+            cls.logger.debug("Perspective transform applied successfully")
+            return warped
+        except Exception as e:
+            cls.logger.warning(f"Failed to apply perspective transform: {e}")
             return None
 
     @classmethod

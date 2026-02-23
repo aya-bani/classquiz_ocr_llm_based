@@ -6,15 +6,19 @@ from PIL import Image
 
 
 class CoordinateMapper:
+    
     """
     coordinate mapper that transforms coordinates from original document 
-    to captured image using ArUco markers. All configuration is passed as parameters.
+    to captured image using ArUco markers. All configuration is passed as
+      parameters.
+
     """
     
-    @staticmethod
+    @staticmethod  
     def calculate_original_marker_positions() -> Dict:
         """
-        Calculate the center positions of the 4 markers in the original document.
+        Calculate the center positions of the 4 markers in the original 
+        document.
         
         Args:
         
@@ -81,7 +85,10 @@ class CoordinateMapper:
         return (float(center_x), float(center_y))
     
     @staticmethod
-    def compute_homography_from_scan(scan_result: Dict) -> Optional[np.ndarray]:
+    def compute_homography_from_scan(
+        scan_result: Dict
+    ) -> Optional[np.ndarray]:
+
         """
         Compute homography matrix from ExamScanner scan_page() result.
         
@@ -101,10 +108,13 @@ class CoordinateMapper:
         detected_markers = scan_result['detected_markers']
         corners_data = scan_result['corners']
         
-        return CoordinateMapper.compute_homography(detected_markers, corners_data)
+        return CoordinateMapper.compute_homography(
+            detected_markers, corners_data)
     
     @staticmethod
-    def compute_homography(detected_markers: List[Dict], corners_data: List[np.ndarray]) -> Optional[np.ndarray]:
+    def compute_homography(
+        detected_markers: List[Dict], corners_data: List[np.ndarray]
+        ) -> Optional[np.ndarray]:
         """
         Compute homography matrix from detected markers.
         
@@ -196,7 +206,8 @@ class CoordinateMapper:
             homography_matrix: Homography transformation matrix
             
         Returns:
-            List of (x, y) tuples in image coordinates or None if transformation fails
+            List of (x, y) tuples in image coordinates or None if
+              transformation fails
         """
         if homography_matrix is None:
             return None
@@ -208,7 +219,6 @@ class CoordinateMapper:
         transformed = cv2.perspectiveTransform(points, homography_matrix)
         
         return [(float(x), float(y)) for x, y in transformed[0]]
-    
     
     @staticmethod
     def extract_full_document(image: Image.Image, scan_result: Dict) -> Optional[Image.Image]:

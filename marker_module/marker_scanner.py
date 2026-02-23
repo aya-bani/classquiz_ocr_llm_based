@@ -43,41 +43,56 @@ class ExamScanner:
 
         detected_markers, exam_ids, page_numbers = cls._process_markers(ids)
 
-        # Validate single exam ID
-        if len(exam_ids) > 1:
-            cls.logger.error(f"Multiple exam IDs detected: {exam_ids}")
+        # Separate dynamic markers (which encode exam_id + page_number) from fixed markers
+        dynamic_markers = [m for m in detected_markers if m['marker_id'] >= max(MarkerConfig.FIXED_MARKER_IDS) + 1]
+        fixed_markers = [m for m in detected_markers if m['marker_id'] < max(MarkerConfig.FIXED_MARKER_IDS) + 1]
+        
+        cls.logger.debug(f"Detected {len(dynamic_markers)} dynamic + {len(fixed_markers)} fixed markers")
+
+        # Extract exam/page from dynamic markers only (fixed ones return dummy 0,0)
+        dynamic_exam_ids = {m['exam_id'] for m in dynamic_markers}
+        dynamic_page_numbers = {m['page_number'] for m in dynamic_markers}
+
+        # Validate single exam ID from dynamic markers
+        if len(dynamic_exam_ids) > 1:
+            cls.logger.error(f"Multiple exam IDs detected in dynamic markers: {dynamic_exam_ids}")
             return cls._create_error_result(
-                f'Multiple exam IDs detected: {exam_ids}',
+                f'Multiple exam IDs detected: {dynamic_exam_ids}',
                 len(ids),
                 detected_markers
             )
 
-        # Validate single page number
-        if len(page_numbers) > 1:
-            cls.logger.error(f"Multiple page numbers detected: {page_numbers}")
+        # Validate single page number from dynamic markers
+        if len(dynamic_page_numbers) > 1:
+            cls.logger.error(f"Multiple page numbers detected in dynamic markers: {dynamic_page_numbers}")
             return cls._create_error_result(
-                f'Multiple page numbers detected: {page_numbers}',
+                f'Multiple page numbers detected: {dynamic_page_numbers}',
                 len(ids),
                 detected_markers,
-                exam_id=next(iter(exam_ids))
+                exam_id=next(iter(dynamic_exam_ids)) if dynamic_exam_ids else None
             )
-        if not exam_ids or not page_numbers:
-            cls.logger.error("No valid exam ID or page number decoded from markers")
+
+        # At least one dynamic marker must be present
+        if not dynamic_exam_ids or not dynamic_page_numbers:
+            cls.logger.error("No dynamic markers detected (critical for exam identification)")
             return cls._create_error_result(
-                "Could not decode valid exam ID or page number from detected markers",
+                "No dynamic markers detected. Cannot identify exam/page.",
                 len(ids),
                 detected_markers
             )
-        exam_id = next(iter(exam_ids))
-        page_number = next(iter(page_numbers))
+
+        exam_id = next(iter(dynamic_exam_ids))
+        page_number = next(iter(dynamic_page_numbers))
         
-        cls.logger.info(f"Scan success exam={exam_id} page={page_number}")
+        cls.logger.info(f"Scan success exam={exam_id} page={page_number} (found {len(dynamic_markers)} dynamic + {len(fixed_markers)} fixed markers)")
 
         return {
             'success': True,
             'exam_id': exam_id,
             'page_number': page_number,
             'markers_found': len(ids),
+            'dynamic_markers_found': len(dynamic_markers),
+            'fixed_markers_found': len(fixed_markers),
             'expected_markers': MarkerConfig.CORNERS_PER_PAGE,
             'detected_markers': detected_markers,
             'corners': corners,
@@ -85,22 +100,112 @@ class ExamScanner:
         }
 
     @classmethod
-    def _convert_to_grayscale(cls, image: np.ndarray) -> np.ndarray:
-        """Convert image to grayscale if needed."""
+    def _preprocess_image(cls, image: np.ndarray) -> np.ndarray:
+        """
+        Preprocess image to enhance ArUco marker visibility.
+        
+        Steps:
+        - Convert to grayscale
+        - Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        - Denoise
+        - Sharpen
+        """
+        # Ensure grayscale
         if len(image.shape) == 3:
-            return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        return image
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+        
+        # Apply CLAHE for contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Denoise
+        denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
+        
+        # Sharpen using unsharp mask
+        blurred = cv2.GaussianBlur(denoised, (3, 3), 0)
+        sharpened = cv2.addWeighted(denoised, 1.5, blurred, -0.5, 0)
+        
+        cls.logger.debug("Preprocessing complete: CLAHE + denoise + sharpen")
+        return sharpened
 
     @classmethod
-    def _detect_markers(cls, gray_image: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
-        """Detect ArUco markers in grayscale image."""
+    def _detect_markers(cls, image: np.ndarray) -> Tuple[List, Optional[np.ndarray]]:
+        """
+        Detect ArUco markers with multiple strategies.
+        
+        Tries multiple strategies and returns the best result 
+        (prioritizing detections that include a dynamic marker).
+        
+        Returns: (corners, ids) tuple
+        """
         aruco_dict = cv2.aruco.getPredefinedDictionary(MarkerConfig.DICT_TYPE)
-        detector = cv2.aruco.ArucoDetector(
-            aruco_dict,
-            cv2.aruco.DetectorParameters()
-        )
-        corners, ids, _ = detector.detectMarkers(gray_image)
-        return corners, ids
+        preprocessed = cls._preprocess_image(image)
+        
+        strategies = [
+            ("raw_strict", image, lambda: cv2.aruco.DetectorParameters()),
+            ("prep_strict", preprocessed, lambda: cv2.aruco.DetectorParameters()),
+            ("prep_lenient", preprocessed, lambda: cls._create_lenient_params()),
+            ("prep_very_lenient", preprocessed, lambda: cls._create_very_lenient_params())
+        ]
+        
+        best_result = ([], None)
+        best_has_dynamic = False
+        
+        for name, img_to_use, create_params in strategies:
+            try:
+                params = create_params()
+                detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+                corners, ids, _ = detector.detectMarkers(img_to_use)
+                
+                if ids is not None and len(ids) > 0:
+                    # Check if this detection includes a dynamic marker (ID >= 3)
+                    first_dynamic = max(MarkerConfig.FIXED_MARKER_IDS) + 1
+                    has_dynamic = any(mid >= first_dynamic for mid in ids.flatten())
+                    
+                    cls.logger.debug(f"[{name}] found {len(ids)} markers, dynamic={has_dynamic}")
+                    
+                    # Keep this result if:
+                    # 1. It has a dynamic marker and best so far doesn't
+                    # 2. Or same quality but more markers
+                    if (has_dynamic and not best_has_dynamic) or \
+                       (has_dynamic == best_has_dynamic and len(ids) > len(best_result[1] or [])):
+                        best_result = (corners, ids)
+                        best_has_dynamic = has_dynamic
+                        cls.logger.debug(f"[{name}] is new best result")
+            except Exception as e:
+                cls.logger.warning(f"Detection [{name}] failed: {e}")
+                continue
+        
+        if best_result[1] is not None and len(best_result[1]) > 0:
+            cls.logger.debug(f"Returning best: {len(best_result[1])} markers, dynamic={best_has_dynamic}")
+            return best_result
+        
+        cls.logger.warning("All detection strategies failed")
+        return [], None
+    
+    @classmethod
+    def _create_lenient_params(cls) -> cv2.aruco.DetectorParameters:
+        """Create lenient detector parameters."""
+        params = cv2.aruco.DetectorParameters()
+        params.adaptiveThreshConstant = 5
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 23
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        params.polygonalApproxAccuracyRate = 0.03
+        return params
+    
+    @classmethod
+    def _create_very_lenient_params(cls) -> cv2.aruco.DetectorParameters:
+        """Create very lenient detector parameters."""
+        params = cv2.aruco.DetectorParameters()
+        params.adaptiveThreshConstant = 2
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 40
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+        params.polygonalApproxAccuracyRate = 0.1
+        return params
 
     @classmethod
     def _process_markers(cls, ids: np.ndarray) -> Tuple[List[Dict], set, set]:
@@ -171,9 +276,19 @@ class ExamScanner:
             
         Examples:
             marker_id=0  → (dummy, dummy, 'top_left')      # Fixed marker
-            marker_id=14 → (2, 1, 'bottom_right')          # Dynamic: exam 2, page 1
+            marker_id=14 → (2, 1, 'bottom_right') # Dynamic: exam 2, page 1
         """
-        first_dynamic = max(MarkerConfig.FIXED_MARKER_IDS) + 1  
+        # validate range first
+        if not (0 <= marker_id <= MarkerConfig.MAX_MARKER_ID):
+            cls.logger.error(
+                f"marker_id {marker_id} out of valid range 0-{MarkerConfig.MAX_MARKER_ID}"
+                )
+            raise ValueError(
+                f"marker_id must be between 0 and {MarkerConfig.MAX_MARKER_ID}"
+                )
+
+        first_dynamic = max(MarkerConfig.FIXED_MARKER_IDS) + 1   
+        #First dynamic marker ID is 3
         
         if marker_id < first_dynamic:
             # Fixed marker (0, 1, 2) - corner indicator only
@@ -225,7 +340,77 @@ class ExamScanner:
         return img_array
 
     @classmethod
+    def infer_missing_corner(
+        cls, 
+        detected_markers: List[Dict], 
+        corners_data: List[np.ndarray]
+    ) -> Optional[Tuple[str, np.ndarray]]:
+        """
+        If 3 corners are detected, infer the 4th using geometric reasoning.
+        
+        Assumes the document outline is roughly rectangular. Uses parallelogram rule:
+        if corners A, B, C are known, the 4th corner D ≈ A + C - B
+        
+        Args:
+            detected_markers: List of detected marker info dicts with 'corner' field
+            corners_data: List of corner arrays from ArUco detection (same order)
+        
+        Returns:
+            Tuple of (missing_corner_name, inferred_corners_array) or None if can't infer
+        """
+        if len(detected_markers) != 3:
+            return None
+        
+        corner_names = MarkerConfig.CORNER_NAMES  # ['top_left', 'top_right', 'bottom_left', 'bottom_right']
+        detected_corners = {m['corner']: corners_data[i][0] for i, m in enumerate(detected_markers)}
+        missing = [c for c in corner_names if c not in detected_corners]
+        
+        if len(missing) != 1:
+            return None
+        
+        missing_corner = missing[0]
+        
+        # Use vector parallelogram: if A, B, C known and D missing, D ≈ A + C - B
+        # Pick the opposite corner pairs smartly
+        try:
+            corners = detected_corners
+            
+            if missing_corner == 'bottom_right':
+                # D = TL + BR_estimate where BR_estimate ≈ TR + BL - TL
+                tl = corners.get('top_left', corners.get('bottom_left'))
+                tr = corners.get('top_right', corners.get('top_left'))
+                bl = corners.get('bottom_left', corners.get('top_left'))
+                inferred = tr + bl - tl
+            elif missing_corner == 'bottom_left':
+                # Similar logic
+                tl = corners.get('top_left', corners.get('top_right'))
+                tr = corners.get('top_right', corners.get('bottom_right'))
+                br = corners.get('bottom_right', corners.get('top_right'))
+                inferred = tl + br - tr
+            elif missing_corner == 'top_right':
+                tl = corners.get('top_left', corners.get('bottom_right'))
+                bl = corners.get('bottom_left', corners.get('top_left'))
+                br = corners.get('bottom_right', corners.get('bottom_left'))
+                inferred = tl + br - bl
+            elif missing_corner == 'top_left':
+                tr = corners.get('top_right', corners.get('bottom_left'))
+                bl = corners.get('bottom_left', corners.get('bottom_right'))
+                br = corners.get('bottom_right', corners.get('top_right'))
+                inferred = tr + bl - br
+            else:
+                return None
+            
+            # Create corners array in shape (4, 2)
+            inferred_corners = np.array([inferred], dtype=np.float32)
+            cls.logger.debug(f"Inferred {missing_corner} corner: {inferred}")
+            return (missing_corner, inferred_corners)
+        except Exception as e:
+            cls.logger.warning(f"Failed to infer missing corner {missing_corner}: {e}")
+            return None
+
+    @classmethod
     def organize_by_page(cls, scan_results: List[Dict]) -> Dict[int, Dict[int, Dict]]:
+
         """
         Organize scan results by exam ID and page number.
         """

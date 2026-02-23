@@ -22,7 +22,8 @@ def test_calculate_markers_basic(generator):
     # different exam still uses same fixed values
     ids2 = generator.calculate_markers(1, 0)
     assert ids2[:3] == MarkerConfig.FIXED_MARKER_IDS
-    expected_fourth = 1 * MarkerConfig.BLOCK_SIZE + (MarkerConfig.CORNERS_PER_PAGE - 1)
+    expected_fourth = 1 * MarkerConfig.BLOCK_SIZE + (
+        MarkerConfig.CORNERS_PER_PAGE - 1)
     assert ids2[3] == expected_fourth
     assert len(ids2) == MarkerConfig.CORNERS_PER_PAGE
 
@@ -93,3 +94,35 @@ def test_generate_marked_exam_roundtrip(generator):
     # markers should differ from plain white
     arr = np.array(marked[0])
     assert not np.all(arr == 255)
+
+
+def test_scan_real_exam_image():
+    """Load a real exam photo and run the scanner on it."""
+    import os
+    import cv2
+
+    from marker_module.marker_scanner import ExamScanner
+
+    img_path = os.path.join(
+        os.path.dirname(__file__),
+        '..', 'Exams', 'real_exams', 'IMG_6168.jpg'
+    )
+    img_path = os.path.normpath(img_path)
+
+    img = cv2.imread(img_path)
+    assert img is not None, f"could not load image at {img_path}"
+
+    result = ExamScanner.scan_page(img)
+    # basic expectations
+    assert isinstance(result, dict)
+    assert 'success' in result
+    # at least one marker must be found for a valid test
+    assert result['markers_found'] > 0
+    # scanner should report success if markers were present
+    assert result['success'] is True
+    # dynamic markers should exist for a real exam page
+    assert result.get('dynamic_markers_found', 0) > 0
+    # exam_id/page_number should be integers
+    assert isinstance(result.get('exam_id'), int)
+    assert isinstance(result.get('page_number'), int)
+

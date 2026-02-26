@@ -3,7 +3,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-sys.path.insert(0, '..')
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 from marker_module.marker_scanner import ExamScanner
 from logger_manager import LoggerManager
 
@@ -14,7 +17,7 @@ def test_scan_exam_image():
     logger.info("Testing ExamScanner on real exam image")
     
     # Load image
-    img_path = "Exams/real_exams/IMG_6166.jpg"
+    img_path = "Exams/real_exams/IMG_6254.jpg"
     image = cv2.imread(img_path)
     
     if image is None:

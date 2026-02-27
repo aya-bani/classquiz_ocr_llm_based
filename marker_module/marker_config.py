@@ -17,11 +17,12 @@ class MarkerConfig:
     MARKER_SIZE = 60
     MARGIN = 24
     MAX_MARKER_ID = 999
-    PAGES_PER_EXAM = 5
+    MAX_PAGES_PER_EXAM = 5  # Maximum pages allowed per exam
     CORNERS_PER_PAGE = 4
-    # BLOCK_SIZE: Each exam uses 5 unique dynamic marker IDs maximum (one per page) + 3 fixed IDs.
-    # Only the fourth corner varies per page; the first three are shared globally.
-    BLOCK_SIZE = PAGES_PER_EXAM + 3  # 5 + 3 = 8 unique IDs per exam
+    # BLOCK_SIZE: Reserve ID space for up to MAX_PAGES_PER_EXAM dynamic
+    # marker IDs (one per actual page) + 3 fixed IDs. Each exam only uses
+    # IDs for pages that actually exist, not all MAX_PAGES_PER_EXAM slots.
+    BLOCK_SIZE = MAX_PAGES_PER_EXAM + 3  # Reserve 8 IDs per exam
     CORNER_NAMES = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
 
     # first three markers are always the same across all pages/exams; the
@@ -29,7 +30,7 @@ class MarkerConfig:
     # must fall within the dictionary’s capacity.
     FIXED_MARKER_IDS = [0, 1, 2]
 
-    MAX_EXAMS = (MAX_MARKER_ID + 1) // BLOCK_SIZE  
+    MAX_EXAMS = (MAX_MARKER_ID + 1) // BLOCK_SIZE
     # coordinate mapper parameters
     DOC_WIDTH = 1654
     DOC_HEIGHT = 2338
@@ -40,4 +41,7 @@ class MarkerConfig:
         logger = LoggerManager.get_logger(__name__)
         cls.MARKED_EXAMS_PATH.mkdir(parents=True, exist_ok=True)
         cls.SCANNED_SUBMISSIONS_PATH.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Created directories: {cls.MARKED_EXAMS_PATH}, {cls.SCANNED_SUBMISSIONS_PATH}")
+        logger.info(
+            f"Created directories: {cls.MARKED_EXAMS_PATH}, "
+            f"{cls.SCANNED_SUBMISSIONS_PATH}"
+        )

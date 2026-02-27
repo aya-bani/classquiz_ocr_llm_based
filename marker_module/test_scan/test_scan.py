@@ -17,7 +17,7 @@ def test_scan_exam_image():
     logger.info("Testing ExamScanner on real exam image")
     
     # Load image
-    img_path = "Exams/real_exams/IMG_6254.jpg"
+    img_path = str(project_root / "Exams" / "real_exams" / "image2.jpg")
     image = cv2.imread(img_path)
     
     if image is None:

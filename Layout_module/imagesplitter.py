@@ -1,17 +1,26 @@
+import os
+
+# -----------------------------
+# 🔥 CRITICAL: Disable oneDNN /MKL (Fix Windows crashes)
+# -----------------------------
+os.environ["FLAGS_use_mkldnn"] = "False"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["PADDLE_USE_MKLDNN"] = "FALSE"
+os.environ["FLAGS_use_onednn"] = "0"
+os.environ["CPU_NUM_THREADS"] = "1"
+
 import cv2
 import numpy as np
-import os
 import logging
 from datetime import datetime
-from paddleocr import PaddleOCR
-import json
+import pytesseract
 import re
 
 
 class ImageSplitter:
     def __init__(self, output_dir='Exams/splited images into sections'):
         """
-        Initialize ImageSplitter with Arabic PaddleOCR
+        Initialize ImageSplitter with Tesseract OCR for Arabic text
         """
         self.setup_logging()
 
@@ -19,9 +28,12 @@ class ImageSplitter:
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(os.path.join(output_dir, 'debug'), exist_ok=True)
 
-        self.logger.info("Initializing PaddleOCR (Arabic)...")
-        self.ocr = PaddleOCR(use_angle_cls=True, lang='ar')
-        self.logger.info("PaddleOCR initialized successfully")
+        self.logger.info("Initializing Tesseract OCR with Arabic support...")
+        
+        # Configure Tesseract for Arabic + English recognition
+        self.tesseract_config = r'--oem 3 --psm 6 -l ara+eng'
+        
+        self.logger.info("Tesseract OCR initialized successfully")
 
         # Arabic section keywords
         self.section_keywords = [
@@ -33,7 +45,7 @@ class ImageSplitter:
             "سؤال"
         ]
 
-        # Regex patterns for Arabic sections
+        # Regex patterns
         self.section_patterns = [
             r"تعليمة\s*\d*",
             r"التمرين\s*\d+",
@@ -42,6 +54,9 @@ class ImageSplitter:
             r"سؤال\s*\d+"
         ]
 
+    # ---------------------------------------------------
+    # Logging
+    # ---------------------------------------------------
     def setup_logging(self):
         logging.basicConfig(
             level=logging.INFO,
@@ -61,14 +76,15 @@ class ImageSplitter:
         else:
             gray = image.copy()
 
-        # Increase contrast
         gray = cv2.equalizeHist(gray)
 
-        # Adaptive threshold
         binary = cv2.adaptiveThreshold(
-            gray, 255,
+            gray,
+            255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
+            cv2.THRESH_BINARY,
+            11,
+            2
         )
 
         return binary
@@ -78,76 +94,73 @@ class ImageSplitter:
     # ---------------------------------------------------
     def detect_section_lines(self, image):
         """
-        Detect Arabic section markers
+        Detect Arabic section markers using Tesseract OCR
         Returns list of Y positions
         """
         self.logger.info("Running OCR to detect Arabic section markers...")
-
+        
         try:
-            # Use original image for OCR
-            result = self.ocr.ocr(image)
+            # Use Tesseract to get detailed OCR data with  bounding boxes
+            ocr_data = pytesseract.image_to_data(
+                image,
+                config=self.tesseract_config,
+                output_type=pytesseract.Output.DICT
+            )
         except Exception as e:
             self.logger.error(f"OCR failed: {e}")
-            self.logger.warning("Falling back to no section detection")
             return []
 
         section_positions = []
         debug_image = image.copy()
 
-        if result and result[0]:
-            for line in result:
-                for word_info in line:
-                    bbox = np.array(word_info[0]).astype(int)
-                    text = word_info[1][0]
-                    confidence = word_info[1][1]
+        # Parse Tesseract output
+        n_boxes = len(ocr_data['text'])
+        for i in range(n_boxes):
+            text = ocr_data['text'][i].strip()
+            conf = int(ocr_data['conf'][i]) if ocr_data['conf'][i] != '-1' else 0
+            
+            if not text or conf < 40:
+                continue
+            
+            x, y, w, h = (
+                ocr_data['left'][i],
+                ocr_data['top'][i],
+                ocr_data['width'][i],
+                ocr_data['height'][i]
+            )
+            
+            # Draw bounding box
+            cv2.rectangle(debug_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            
+            # Arabic keyword detection
+            keyword_match = any(kw in text for kw in self.section_keywords)
+            pattern_match = any(re.search(pattern, text) for pattern in self.section_patterns)
+            
+            if keyword_match or pattern_match:
+                y_center = y + h // 2
+                section_positions.append(y_center)
+                
+                self.logger.info(f"Detected section marker '{text}' at y={y_center}")
+                
+                # Draw horizontal split line
+                cv2.line(
+                    debug_image,
+                    (0, y_center),
+                    (image.shape[1], y_center),
+                    (0, 0, 255),
+                    2
+                )
 
-                    text_clean = text.strip()
-
-                    # Draw OCR bounding box
-                    cv2.polylines(debug_image, [bbox], True, (0, 255, 0), 2)
-
-                    if confidence < 0.6:
-                        continue
-
-                    # Check simple keyword match
-                    keyword_match = any(
-                        re.search(rf"\b{kw}\b", text_clean)
-                        for kw in self.section_keywords
-                    )
-
-                    # Check regex patterns
-                    pattern_match = any(
-                        re.search(pattern, text_clean)
-                        for pattern in self.section_patterns
-                    )
-
-                    if keyword_match or pattern_match:
-                        y_coords = [point[1] for point in bbox]
-                        y_center = int(sum(y_coords) / len(y_coords))
-
-                        section_positions.append(y_center)
-
-                        self.logger.info(
-                            f"Detected section marker '{text_clean}' at y={y_center}"
-                        )
-
-                        # Draw horizontal split line
-                        cv2.line(
-                            debug_image,
-                            (0, y_center),
-                            (image.shape[1], y_center),
-                            (0, 0, 255),
-                            2
-                        )
-
-        # Remove duplicates and very close lines
+        # ---------------------------------------
+        # Remove close duplicates (adaptive)
+        # ---------------------------------------
         section_positions = sorted(section_positions)
         filtered_positions = []
 
         for y in section_positions:
             if not filtered_positions:
                 filtered_positions.append(y)
-            elif abs(y - filtered_positions[-1]) > 50:
+            elif abs(y - filtered_positions[-1]) > 0.03 * image.shape[0]:
                 filtered_positions.append(y)
 
         # Save debug image
@@ -156,10 +169,12 @@ class ImageSplitter:
             'debug',
             f'ocr_debug_{datetime.now().strftime("%Y%m%d_%H%M%S")}.jpg'
         )
+
         cv2.imwrite(debug_path, debug_image)
         self.logger.info(f"Saved debug image to {debug_path}")
 
         self.logger.info(f"Final detected section markers: {len(filtered_positions)}")
+
         return filtered_positions
 
     # ---------------------------------------------------
@@ -178,21 +193,23 @@ class ImageSplitter:
             self.logger.warning("No section markers found")
             return [image]
 
-        split_points = [0] + section_lines + [height]
+        split_points = sorted(section_lines)
+        split_points = [0] + split_points + [height]
+
         sections = []
 
         for i in range(len(split_points) - 1):
             start_y = split_points[i]
             end_y = split_points[i + 1]
 
-            # Add padding
             padding = 10
             start_y = max(0, start_y - padding)
             end_y = min(height, end_y + padding)
 
-            if end_y - start_y > 80:  # minimum height
+            if end_y - start_y > 80:
                 section = image[start_y:end_y, :]
                 sections.append(section)
+
                 self.logger.info(
                     f"Created section {i+1}: y={start_y}-{end_y}"
                 )
@@ -204,14 +221,17 @@ class ImageSplitter:
     # ---------------------------------------------------
     def save_sections(self, sections, exam_id):
         saved_paths = []
+
         save_dir = os.path.join(self.output_dir, f'exam_{exam_id}')
         os.makedirs(save_dir, exist_ok=True)
 
         for i, section in enumerate(sections, 1):
             filename = f"exam_{exam_id}_section_{i:02d}.jpg"
             path = os.path.join(save_dir, filename)
+
             cv2.imwrite(path, section)
             saved_paths.append(path)
+
             self.logger.info(f"Saved section {i} -> {path}")
 
         return saved_paths
@@ -226,6 +246,7 @@ class ImageSplitter:
             return {"success": False, "error": "Image not found"}
 
         image = cv2.imread(image_path)
+
         if image is None:
             return {"success": False, "error": "Failed to load image"}
 

@@ -8,7 +8,7 @@ import shutil
 
 def main():
     # input image inside this test folder
-    img_file = Path(__file__).parent / "corr3matht1d2_cropped.jpg"
+    img_file = Path(__file__).parent / "corr3arlectt1d2_cropped.jpg"
     if not img_file.exists():
         raise FileNotFoundError(f"Expected test image not found: {img_file}")
 

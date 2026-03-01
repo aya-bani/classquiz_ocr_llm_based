@@ -370,12 +370,12 @@ class ExamScanner:
         Decode a marker ID into exam ID, page number, and corner position.
         
         The fourth (dynamic) marker is calculated as:
-            fourth_id = 3 + (exam_id * PAGES_PER_EXAM) + page_number
+            fourth_id = 3 + (exam_id * MAX_PAGES_PER_EXAM) + page_number
         
         To decode, we reverse the formula:
             id_offset = marker_id - 3
-            exam_id = id_offset // PAGES_PER_EXAM
-            page_number = id_offset % PAGES_PER_EXAM
+            exam_id = id_offset // MAX_PAGES_PER_EXAM
+            page_number = id_offset % MAX_PAGES_PER_EXAM
         
         The fixed markers (0, 1, 2) are just corner indicators and use their
         ID directly as the corner position.
@@ -411,8 +411,8 @@ class ExamScanner:
         else:
             # Dynamic marker - extract exam_id and page_number
             id_offset = marker_id - first_dynamic
-            exam_id = id_offset // MarkerConfig.PAGES_PER_EXAM
-            page_number = id_offset % MarkerConfig.PAGES_PER_EXAM
+            exam_id = id_offset // MarkerConfig.MAX_PAGES_PER_EXAM
+            page_number = id_offset % MarkerConfig.MAX_PAGES_PER_EXAM
             corner_id = 3  # Dynamic markers are always at the fourth corner
         
         corner_names = ['top_left', 'top_right', 'bottom_left', 'bottom_right']

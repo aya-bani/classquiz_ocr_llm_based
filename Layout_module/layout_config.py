@@ -25,7 +25,11 @@ class LayoutConfig:
     CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH"))
 
     SIMILARITY_THRESHOLD = 70
-    KEY_WORDS = ["تعليمة", "سند"] 
+    KEY_WORDS = ["تعليمة", "سند", "التَّعْلِيمَة", "التَّعْلِيمَةُ",
+        "التَّعْلِيمَةِ", "التَّعْلِيمَةَ", "السَّنَد", "السَّنَدُ",
+        "السَّنَدِ" , "تَعْليمَة", "سَنَد", "تَعْليمَةٌ", "تَعْليمَةٍ", 
+        "تَعْليمَةً", "سَنَدٌ", "سَنَدٍ"
+    ]
     EXCLUDED_KEYWORDS = ["تسند"]
 
     @classmethod

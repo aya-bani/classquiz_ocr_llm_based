@@ -11,7 +11,7 @@ def main():
     splitter = ImageSplitter()
 
     result = splitter.split_and_save(
-        str(Path(__file__).parent / "corr3matht1d2_cropped.jpg"),
+        str(Path(__file__).parent / "corr3sct1d2_cropped.jpg"),
         exam_id=1,
         return_sections=True
     )

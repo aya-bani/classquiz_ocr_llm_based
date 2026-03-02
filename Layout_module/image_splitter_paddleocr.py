@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import cv2
 import logging
+import re
 import unicodedata
 from pathlib import Path
 from datetime import datetime
@@ -113,7 +114,7 @@ EXCLUDED_NORM: frozenset[str] = frozenset(normalize_arabic(w) for w in EXCLUDED_
 
 def is_valid_section_start(
     ocr_word: str,
-    fuzzy_threshold: int = 95,
+    fuzzy_threshold: int = 0,
 ) -> tuple[bool, str, int]:
     """
     Decide whether *ocr_word* is a valid section-start keyword.
@@ -133,29 +134,44 @@ def is_valid_section_start(
     Decision pipeline
     ─────────────────
     Step 1 – Normalise.
-    Step 2 – Exact exclusion check  → reject if in EXCLUDED_NORM.
+    Step 2 – Hard exclude if the FIRST token matches EXCLUDED_NORM.
              "تسند" normalises to "تسند" which IS in EXCLUDED_NORM → rejected.
              "سند"  normalises to "سند"  which is NOT in EXCLUDED_NORM → passes.
-    Step 3 – Exact allowance check  → accept if in ALLOWED_NORM.
-             No substring logic, no root matching, no partial comparison.
+    Step 3 – Accept only if text STARTS with one keyword in ALLOWED_NORM
+             as a standalone first word (e.g. "تعليمة 1", "السند:").
+             No root matching and no partial substring matching inside words.
     Step 4 – fuzz.ratio() fallback  (full-string Levenshtein, NOT partial_ratio).
              partial_ratio() would allow substring matches and is NOT used here.
              fuzz.ratio("سند", "مسندة") ≈ 57  <  95  → rejected  ✓
              fuzz.ratio("سند", "سنذ")   ≈ 83  <  95  → rejected  ✓
     Step 5 – Reject.
     """
+    def _starts_with_keyword(text: str, keyword_set: frozenset[str]) -> str:
+        for kw in sorted(keyword_set, key=len, reverse=True):
+            if not text.startswith(kw):
+                continue
+            if len(text) == len(kw):
+                return kw
+            next_char = text[len(kw)]
+            if not ('\u0600' <= next_char <= '\u06FF'):
+                return kw
+        return ""
+
     # ── Step 1: normalise ────────────────────────────────────────────────
     norm = normalize_arabic(ocr_word)
+    norm = re.sub(r"\s+", " ", norm)
     if not norm:
         return False, "", 0
 
-    # ── Step 2: hard exclusion (exact) ───────────────────────────────────
-    if norm in EXCLUDED_NORM:
+    # ── Step 2: hard exclusion on first token ────────────────────────────
+    excluded_kw = _starts_with_keyword(norm, EXCLUDED_NORM)
+    if excluded_kw:
         return False, "", 0
 
-    # ── Step 3: exact match ───────────────────────────────────────────────
-    if norm in ALLOWED_NORM:
-        return True, norm, 100
+    # ── Step 3: exact prefix match on first token ────────────────────────
+    matched_kw = _starts_with_keyword(norm, ALLOWED_NORM)
+    if matched_kw:
+        return True, matched_kw, 100
 
     # ── Step 4: high-confidence fuzzy fallback ────────────────────────────
     if fuzzy_threshold > 0:
@@ -244,7 +260,7 @@ class ImageSplitter:
     # ── Tunable config ────────────────────────────────────────────────── #
     MIN_SECTION_HEIGHT_PX:    int   = 80
     MIN_CONFIDENCE:           float = 0.25
-    FUZZY_FALLBACK_THRESHOLD: int   = 95    # 0 = pure exact match
+    FUZZY_FALLBACK_THRESHOLD: int   = 0    # strict first-word matching only
 
     # Preprocessing
     PREPROCESS_UPSCALE:         bool  = True
@@ -273,6 +289,8 @@ class ImageSplitter:
         self.ocr = PaddleOCR(
             use_angle_cls=True,
             lang=lang,
+            enable_mkldnn=False,
+            device='cpu',
         )
         self.logger.info("PaddleOCR ready.")
 

@@ -9,6 +9,10 @@ Test / demo script for image_splitter_paddleocr.ImageSplitter.
 """
 
 import os
+# Disable oneDNN before any Paddle imports
+os.environ['FLAGS_use_mkldnn'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
 import sys
 from pathlib import Path
 
@@ -24,7 +28,7 @@ from Layout_module.image_splitter_paddleocr import ImageSplitter
 
 # ── Config ────────────────────────────────────────────────────────────── #
 IMAGE_PATH = str(Path(__file__).parent / "corr3matht1d2_cropped.jpg")
-EXAM_ID    = 1
+EXAM_ID    = 2
 OUTPUT_DIR = str(Path(__file__).parent / "debug_sections_paddle")
 
 

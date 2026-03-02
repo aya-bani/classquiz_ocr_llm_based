@@ -4,6 +4,23 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
+from marker_module.marker_scanner import ExamScanner
+from marker_module.coordinate_mapper import CoordinateMapper
+from marker_module.marker_config import MarkerConfig
+
+def _resolve_input_image(project_root: Path) -> Path:
+	base_dir = project_root / "Exams" / "new_real_exams"
+	if len(sys.argv) > 1:
+		candidate = Path(sys.argv[1])
+		if not candidate.is_absolute():
+			candidate = base_dir / candidate
+		return candidate
+
+	allowed = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+	images = sorted([p for p in base_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed])
+	if not images:
+		return base_dir / "ex4.jpg"
+	return images[0]
 
 
 def main() -> int:
@@ -11,13 +28,12 @@ def main() -> int:
 	if str(project_root) not in sys.path:
 		sys.path.insert(0, str(project_root))
 
-	from marker_module.marker_scanner import ExamScanner
-	from marker_module.coordinate_mapper import CoordinateMapper
-	from marker_module.marker_config import MarkerConfig
 
-	input_path = project_root / "Exams" / "new_real_exams" / "ex5.jpg"
+
+	input_path = _resolve_input_image(project_root)
 	output_dir = project_root / "Exams" / "output_mapper"
 	output_dir.mkdir(parents=True, exist_ok=True)
+	stem = input_path.stem
 
 	print("=" * 72)
 	print("COORDINATE MAPPER TEST")
@@ -52,7 +68,8 @@ def main() -> int:
 		print("ERROR: failed to compute homography")
 		return 1
 
-	np.save(output_dir / "homography_ex2.npy", homography)
+	homography_path = output_dir / f"homography_{stem}.npy"
+	np.save(homography_path, homography)
 
 	scan_result = {
 		"success": True,
@@ -67,7 +84,7 @@ def main() -> int:
 		print("ERROR: dewarping failed")
 		return 1
 
-	dewarped_path = output_dir / "ex2_dewarped.jpg"
+	dewarped_path = output_dir / f"{stem}_dewarped.jpg"
 	dewarped.save(dewarped_path, quality=95)
 
 	vis = image.copy()
@@ -99,11 +116,11 @@ def main() -> int:
 		pts = np.array(mapped_corners, dtype=np.int32)
 		cv2.polylines(vis, [pts], isClosed=True, color=(255, 0, 0), thickness=3)
 
-	vis_path = output_dir / "ex2_mapper_visualization.jpg"
+	vis_path = output_dir / f"{stem}_mapper_visualization.jpg"
 	cv2.imwrite(str(vis_path), vis)
 
 	print("\nSaved outputs:")
-	print(f"- {output_dir / 'homography_ex2.npy'}")
+	print(f"- {homography_path}")
 	print(f"- {dewarped_path}")
 	print(f"- {vis_path}")
 	print("\nMarker centers (image coords):")

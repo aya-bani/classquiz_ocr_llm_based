@@ -107,7 +107,7 @@ class ImageSplitter:
     # ------------------------------------------------------------------ #
     # Init
     # ------------------------------------------------------------------ #
-    def __init__(self, output_dir: str = "data/Sections/exams", gpu: bool = False):
+    def __init__(self, output_dir: str = "data/Sections/exams/paddleocr_output", gpu: bool = False):
         self._setup_logging()
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)

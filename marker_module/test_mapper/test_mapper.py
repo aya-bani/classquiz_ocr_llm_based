@@ -1,5 +1,12 @@
 import sys
+import re
 from pathlib import Path
+
+# Ensure package imports work when running this file directly:
+#   python marker_module\test_mapper\test_mapper.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import cv2
 import numpy as np
@@ -8,6 +15,14 @@ from PIL import Image
 from marker_module.marker_scanner import ExamScanner
 from marker_module.coordinate_mapper import CoordinateMapper
 from marker_module.marker_config import MarkerConfig
+
+
+def _output_stem_from_input(input_path: Path) -> str:
+    """Build normalized output stem as ex<number> from input file name."""
+    match = re.search(r"(\d+)", input_path.stem)
+    if match:
+        return f"ex{match.group(1)}"
+    return "ex0"
 
 
 def _resolve_input_image(project_root: Path) -> Path:
@@ -23,7 +38,7 @@ def _resolve_input_image(project_root: Path) -> Path:
         [p for p in base_dir.iterdir() if p.is_file() and p.suffix.lower() in allowed]
     )
     if not images:
-        return base_dir / "ex10.jpg"
+        return base_dir / "ex14.jpg"
     return images[0]
 
 
@@ -72,6 +87,7 @@ def main() -> int:
     output_dir = project_root / "Exams" / "output_mapper"
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = input_path.stem
+    output_stem = _output_stem_from_input(input_path)
 
     print("=" * 72)
     print("COORDINATE MAPPER TEST")
@@ -167,7 +183,7 @@ def main() -> int:
         print("ERROR: dewarping failed")
         return 1
 
-    dewarped_path = output_dir / f"{stem}_dewarped.jpg"
+    dewarped_path = output_dir / f"{output_stem}_dewraped.jpg"
     dewarped.save(dewarped_path, quality=95)
 
     # ------------------------------------------------------------------ #
@@ -192,9 +208,20 @@ def main() -> int:
         (float(MarkerConfig.DOC_WIDTH), float(MarkerConfig.DOC_HEIGHT)),
         (0.0, float(MarkerConfig.DOC_HEIGHT)),
     ]
+    inside_crop_path = None
     mapped_corners = CoordinateMapper.map_points_to_image(doc_corners_doc, homography)
     if mapped_corners:
         pts = np.array(mapped_corners, dtype=np.int32)
+
+        # Keep only pixels inside the projected document boundary (no blue edge).
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask, [pts], 255)
+        inside_only = cv2.bitwise_and(image, image, mask=mask)
+        x, y, w, h = cv2.boundingRect(pts)
+        inside_crop = inside_only[y:y + h, x:x + w]
+        inside_crop_path = output_dir / f"{output_stem}_inside_blue_edges.jpg"
+        cv2.imwrite(str(inside_crop_path), inside_crop)
+
         cv2.polylines(vis, [pts], isClosed=True, color=COLOR_OUTLINE, thickness=3)
 
     # Legend
@@ -209,7 +236,7 @@ def main() -> int:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
         legend_y += 25
 
-    vis_path = output_dir / f"{stem}_mapper_visualization.jpg"
+    vis_path = output_dir / f"{output_stem}_mapper_visualisation.jpg"
     cv2.imwrite(str(vis_path), vis)
 
     # ------------------------------------------------------------------ #
@@ -231,6 +258,8 @@ def main() -> int:
     print(f"  {homography_path}")
     print(f"  {dewarped_path}")
     print(f"  {vis_path}")
+    if inside_crop_path is not None:
+        print(f"  {inside_crop_path}")
     print("\nDone.")
     return 0
 

@@ -20,7 +20,7 @@ class AgentsConfig:
     # Environment variables
     RATE_LIMIT = int(os.getenv("GEMINI_API_RATE_LIMIT", "150"))
     MIN_INTERVAL = 60.0 / RATE_LIMIT
-    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-preview-04-17")
     GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")
     
     # Prompt templates

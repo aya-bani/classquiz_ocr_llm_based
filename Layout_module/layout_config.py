@@ -1,7 +1,12 @@
 from pathlib import Path
-from logger_manager import LoggerManager
 import os
 from dotenv import load_dotenv
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from logger_manager import LoggerManager
 
 # Load environment once at module level
 load_dotenv()
@@ -23,25 +28,28 @@ class LayoutConfig:
 
     # OCR and keyword matching
     CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH"))
+    
+    # Gemini API for keyword extraction
+    GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")  # Set your API key in .env file
+    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
     SIMILARITY_THRESHOLD = 70
-    KEY_WORDS = ["تعليمة", "سند", "التَّعْلِيمَة", "التَّعْلِيمَةُ",
-        "التَّعْلِيمَةِ", "التَّعْلِيمَةَ", "السَّنَد", "السَّنَدُ",
-        "السَّنَدِ" , "تَعْليمَة", "سَنَد", "تَعْليمَةٌ", "تَعْليمَةٍ", 
-        "تَعْليمَةً", "سَنَدٌ", "سَنَدٍ"
-    ]
+    KEY_WORDS = ["تعليمة", "سند"]
     EXCLUDED_KEYWORDS = ["تسند"]
 
     @classmethod
     def validate(cls):
         """Validate that required configuration is present"""
         
+        if not cls.GEMINI_API_KEY:
+            cls.logger.warning("GEMINI_AI_API_KEY not found - Gemini features disabled")
+        
         if not cls.CREDENTIALS_PATH:
-            cls.logger.error("GOOGLE_CREDENTIALS_PATH not found in environment variables")
-            raise ValueError("GOOGLE_CREDENTIALS_PATH is required")
+            cls.logger.warning("GOOGLE_CREDENTIALS_PATH not found - Google Vision disabled")
 
         cls.logger.info(
-            f"Layout config validated - Credentials: {cls.CREDENTIALS_PATH}"
+            f"Layout config validated - Gemini: {bool(cls.GEMINI_API_KEY)}, "
+            f"GCV: {bool(cls.CREDENTIALS_PATH)}"
         )
         return True
     

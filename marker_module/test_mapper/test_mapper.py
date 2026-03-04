@@ -1,10 +1,5 @@
 """
-test_mapper.py
---------------
-Three-stage pipeline:
-  1_mapper_visualisation  -- annotated original photo
-  2_inside_boundary       -- raw paper crop (pre-correction)
-  3_dewarped              -- perspective-corrected portrait document
+test_mapper.py — three-stage pipeline with quadrant-aware marker validation.
 """
 
 import sys
@@ -20,16 +15,16 @@ import numpy as np
 from PIL import Image
 
 from marker_module.marker_scanner import ExamScanner
-from marker_module.coordinate_mapper import CoordinateMapper, validate_and_clean_markers
+from marker_module.coordinate_mapper import CoordinateMapper
 from marker_module.marker_config import MarkerConfig
 
 
-def _output_stem_from_input(p: Path) -> str:
+def _stem(p: Path) -> str:
     m = re.search(r"(\d+)", p.stem)
     return f"ex{m.group(1)}" if m else "ex0"
 
 
-def _resolve_input_image(project_root: Path) -> Path:
+def _resolve_input(project_root: Path) -> Path:
     base = project_root / "Exams" / "new_real_exams"
     if len(sys.argv) > 1:
         c = Path(sys.argv[1])
@@ -39,31 +34,31 @@ def _resolve_input_image(project_root: Path) -> Path:
     return imgs[0] if imgs else base / "ex14.jpg"
 
 
-def _mode_label(n: int) -> str:
-    if n >= 4: return "FULL (4 markers)"
-    if n == 3: return "PARTIAL (3 markers) -- 1 estimated"
-    if n == 2: return "PARTIAL (2 markers) -- 2 reconstructed"
+def _mode(n: int) -> str:
+    if n >= 4: return "4 markers (full)"
+    if n == 3: return "3 markers (1 estimated)"
+    if n == 2: return "2 markers (2 reconstructed)"
     return f"INSUFFICIENT ({n})"
 
 
-def _draw_corner(vis, center, name, color, estimated=False):
+def draw_corner(vis, center, name, color, estimated=False):
     cx, cy = int(center[0]), int(center[1])
     cv2.circle(vis, (cx, cy), 10, color, -1)
-    cv2.circle(vis, (cx, cy), 10, (0,0,0), 2)  # black outline for visibility
-    label = f"{name} [est]" if estimated else name
-    cv2.putText(vis, label, (cx+12, cy-10),
+    cv2.circle(vis, (cx, cy), 10, (0, 0, 0), 2)
+    lbl = f"{name} [est]" if estimated else name
+    cv2.putText(vis, lbl, (cx+13, cy-10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
 
-def stage1_vis(image, all_corners, estimated_names, boundary_pts):
+def build_vis(image, all_corners, estimated_names, boundary_pts):
     vis = image.copy()
     C_OK  = (0, 220, 0)
     C_EST = (0, 165, 255)
     C_BND = (255, 50, 50)
     for name, center in all_corners.items():
-        _draw_corner(vis, center, name,
-                     C_EST if name in estimated_names else C_OK,
-                     estimated=(name in estimated_names))
+        draw_corner(vis, center, name,
+                    C_EST if name in estimated_names else C_OK,
+                    estimated=(name in estimated_names))
     if boundary_pts is not None:
         cv2.polylines(vis, [boundary_pts], True, C_BND, 3)
     y = 35
@@ -71,12 +66,13 @@ def stage1_vis(image, all_corners, estimated_names, boundary_pts):
                      ("Estimated / reconstructed", C_EST),
                      ("Document boundary", C_BND)]:
         cv2.circle(vis, (22, y), 8, col, -1)
-        cv2.putText(vis, lbl, (38, y+5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+        cv2.putText(vis, lbl, (38, y+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
         y += 30
     return vis
 
 
-def stage2_crop(image, boundary_pts):
+def build_crop(image, boundary_pts):
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [boundary_pts], 255)
     inside = cv2.bitwise_and(image, image, mask=mask)
@@ -85,33 +81,27 @@ def stage2_crop(image, boundary_pts):
     return inside[y:min(image.shape[0], y+h), x:min(image.shape[1], x+w)]
 
 
-def stage3_dewarp(image_bgr, all_corners):
-    warped = CoordinateMapper.dewarp_document(image_bgr, all_corners)
-    if warped is None:
-        return None
-    return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
-
-
 def main() -> int:
     project_root = Path(__file__).resolve().parents[2]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    input_path  = _resolve_input_image(project_root)
-    output_dir  = project_root / "Exams" / "output_mapper"
+    input_path = _resolve_input(project_root)
+    output_dir = project_root / "Exams" / "output_mapper"
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem        = input_path.stem
-    output_stem = _output_stem_from_input(input_path)
+    stem = _stem(input_path)
 
     print("=" * 72)
     print(f"COORDINATE MAPPER  |  {input_path.name}")
     print("=" * 72)
 
-    # ---- Load & detect ------------------------------------------------
+    # ---- Load ---------------------------------------------------------
     image = cv2.imread(str(input_path))
     if image is None:
         print(f"ERROR: cannot read {input_path}"); return 1
+    img_h, img_w = image.shape[:2]
 
+    # ---- Detect -------------------------------------------------------
     preprocessed = ExamScanner._preprocess_image(image)
     corners, ids = ExamScanner._detect_markers_with_fallback(image, preprocessed)
     if ids is None or len(ids) == 0:
@@ -120,21 +110,21 @@ def main() -> int:
     detected_markers, corners_list, exam_ids, page_numbers = (
         ExamScanner._process_markers_with_corners(ids, corners)
     )
-    n_raw = len(detected_markers)
-    print(f"Raw detections   : {n_raw} markers")
+    print(f"Raw detections   : {len(detected_markers)} markers")
     print(f"Exam IDs         : {sorted(exam_ids) if exam_ids else 'N/A'}")
     print(f"Page numbers     : {sorted(page_numbers) if page_numbers else 'N/A'}")
 
-    # ---- Resolve & validate corners -----------------------------------
+    # ---- Resolve & validate corners (with quadrant filter) ------------
     try:
         all_corners_img, estimated_names = CoordinateMapper.resolve_corners(
-            detected_markers, corners_list
+            detected_markers, corners_list,
+            image_w=img_w, image_h=img_h,   # <-- enables quadrant filter
         )
     except ValueError as e:
         print(f"ERROR: {e}"); return 1
 
     n_real = len(all_corners_img) - len(estimated_names)
-    print(f"Valid markers    : {n_real}  ({_mode_label(n_real)})")
+    print(f"Valid markers    : {n_real}  ({_mode(n_real)})")
     if estimated_names:
         print(f"Estimated        : {sorted(estimated_names)}")
 
@@ -145,7 +135,7 @@ def main() -> int:
             tag = " [est]" if name in estimated_names else ""
             print(f"  {name:<16}: ({x:.1f}, {y:.1f}){tag}")
 
-    # ---- Compute document boundary ------------------------------------
+    # ---- Boundary -----------------------------------------------------
     boundary_pts = None
     try:
         bpts = CoordinateMapper.compute_document_boundary_from_markers(all_corners_img)
@@ -153,37 +143,36 @@ def main() -> int:
     except ValueError as e:
         print(f"WARNING: boundary failed: {e}")
 
-    # ---- STAGE 1 ------------------------------------------------------
-    vis = stage1_vis(image, all_corners_img, estimated_names, boundary_pts)
-    p1 = output_dir / f"{output_stem}_1_mapper_visualisation.jpg"
+    # ---- Stage 1: visualisation ---------------------------------------
+    vis = build_vis(image, all_corners_img, estimated_names, boundary_pts)
+    p1 = output_dir / f"{stem}_1_mapper_visualisation.jpg"
     cv2.imwrite(str(p1), vis)
     print(f"\nStage 1 -> {p1.name}")
 
-    # ---- STAGE 2 ------------------------------------------------------
+    # ---- Stage 2: raw paper crop --------------------------------------
     if boundary_pts is not None:
-        crop = stage2_crop(image, boundary_pts)
-        p2 = output_dir / f"{output_stem}_2_inside_boundary.jpg"
+        crop = build_crop(image, boundary_pts)
+        p2 = output_dir / f"{stem}_2_inside_boundary.jpg"
         cv2.imwrite(str(p2), crop)
         print(f"Stage 2 -> {p2.name}")
     else:
-        print("Stage 2 skipped (no boundary)")
+        print("Stage 2 skipped")
 
-    # ---- STAGE 3 ------------------------------------------------------
-    dewarped = stage3_dewarp(image, all_corners_img)
-    if dewarped is None:
+    # ---- Stage 3: dewarped --------------------------------------------
+    warped = CoordinateMapper.dewarp_document(image, all_corners_img)
+    if warped is None:
         print("Stage 3 FAILED"); return 1
-    p3 = output_dir / f"{output_stem}_3_dewarped.jpg"
+    dewarped = Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+    p3 = output_dir / f"{stem}_3_dewarped.jpg"
     dewarped.save(p3, quality=95)
     print(f"Stage 3 -> {p3.name}  ({dewarped.width}x{dewarped.height})")
 
     # ---- Diagnostics --------------------------------------------------
-    scan_result = {
-        "success": True, "markers_found": n_raw,
-        "detected_markers": detected_markers, "corners": corners_list,
-    }
-    H = CoordinateMapper.compute_homography(detected_markers, corners_list)
+    H = CoordinateMapper.compute_homography(
+        detected_markers, corners_list, image_w=img_w, image_h=img_h
+    )
     if H is not None:
-        np.save(output_dir / f"homography_{stem}.npy", H)
+        np.save(output_dir / f"homography_{input_path.stem}.npy", H)
         sc = CoordinateMapper.get_scale_factors(H)
         if sc:
             print(f"\nScale: x={sc['scale_x']:.4f}  y={sc['scale_y']:.4f}  "

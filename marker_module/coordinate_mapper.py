@@ -1,31 +1,5 @@
 """
 coordinate_mapper.py
---------------------
-Transforms coordinates between the original document space and a captured
-image using ArUco markers.
-
-Homography robustness tiers
-    4 markers -> standard cv2.findHomography + RANSAC
-    3 markers -> estimate missing corner via parallelogram rule
-    2 markers -> reconstruct all corners via similarity transform
-    0-1 marker -> fall back to blue-boundary extraction from visualisation
-
-Marker validation
-    Before computing homography, detected markers are validated to ensure
-    they belong to the TARGET document (not markers from other pages in the
-    stack). Validation checks:
-      1. Geometric consistency: the 4 corners must form a convex quadrilateral
-         with the correct TL/TR/BR/BL spatial relationships.
-      2. Aspect ratio: the quad's shape must be plausible for a document of
-         the known DOC_WIDTH x DOC_HEIGHT dimensions.
-      3. Outlier rejection: any single marker that is far from its expected
-         position (given the others) is removed and re-estimated.
-
-Dewarping
-    warpPerspective is called with H built as:
-        src = 4 boundary corners in IMAGE space
-        dst = output canvas corners (0,0 -> DOC_W, DOC_H)
-    No matrix inversion. Orientation corrected automatically.
 """
 
 import cv2
@@ -142,175 +116,77 @@ def extract_blue_boundary(image: np.ndarray):
 
 
 # ===========================================================================
-# Geometry validation helpers
+# Marker validation
 # ===========================================================================
 
-def _is_convex_quad(pts: Dict[str, Tuple[float, float]]) -> bool:
-    """
-    Return True if the 4 corners form a convex quadrilateral with the
-    correct spatial ordering: TL upper-left, TR upper-right, etc.
-
-    Checks:
-      1. Convexity: all cross-products of consecutive edge vectors have
-         the same sign (all clockwise or all counter-clockwise).
-      2. Spatial sanity: TL.x < TR.x, BL.x < BR.x, TL.y < BL.y, TR.y < BR.y
-         (allowing up to 40% tolerance for perspective tilt).
-    """
-    required = {"top_left", "top_right", "bottom_right", "bottom_left"}
-    if not required.issubset(pts.keys()):
-        return False
-
-    tl = np.array(pts["top_left"],     dtype=np.float64)
-    tr = np.array(pts["top_right"],    dtype=np.float64)
-    br = np.array(pts["bottom_right"], dtype=np.float64)
-    bl = np.array(pts["bottom_left"],  dtype=np.float64)
-
-    # Convexity check (vertices in order TL, TR, BR, BL)
-    poly = [tl, tr, br, bl]
-    cross_signs = []
-    n = len(poly)
-    for i in range(n):
-        p0 = poly[i]
-        p1 = poly[(i+1) % n]
-        p2 = poly[(i+2) % n]
-        cross = (p1[0]-p0[0])*(p2[1]-p1[1]) - (p1[1]-p0[1])*(p2[0]-p1[0])
-        cross_signs.append(np.sign(cross))
-    if len(set(cross_signs)) > 1:  # mixed signs -> not convex
-        return False
-
-    # Spatial sanity: each corner should be on the correct side
-    # Allow up to 40% of the diagonal as tolerance for perspective tilt
-    h_span = max(np.linalg.norm(tr-tl), np.linalg.norm(br-bl))
-    v_span = max(np.linalg.norm(bl-tl), np.linalg.norm(br-tr))
-    tol_h = 0.4 * h_span
-    tol_v = 0.4 * v_span
-
-    if not (tl[0] < tr[0] + tol_h):  return False  # TL left of TR
-    if not (bl[0] < br[0] + tol_h):  return False  # BL left of BR
-    if not (tl[1] < bl[1] + tol_v):  return False  # TL above BL
-    if not (tr[1] < br[1] + tol_v):  return False  # TR above BR
-
-    return True
+# Expected image-space quadrant for each corner name.
+# e.g. top_left must be in the LEFT half (x < cx) AND TOP half (y < cy).
+_CORNER_QUADRANT = {
+    "top_left":     ("left",  "top"),
+    "top_right":    ("right", "top"),
+    "bottom_right": ("right", "bottom"),
+    "bottom_left":  ("left",  "bottom"),
+}
 
 
-def _aspect_ratio_ok(pts: Dict[str, Tuple[float, float]],
-                     max_ratio_error: float = 0.6) -> bool:
-    """
-    Check that the quad's aspect ratio is plausible for DOC_WIDTH x DOC_HEIGHT.
-
-    We allow a wide tolerance (0.6) because perspective distortion can
-    significantly change the apparent ratio.
-    """
-    tl = np.array(pts["top_left"],     dtype=np.float64)
-    tr = np.array(pts["top_right"],    dtype=np.float64)
-    br = np.array(pts["bottom_right"], dtype=np.float64)
-    bl = np.array(pts["bottom_left"],  dtype=np.float64)
-
-    w = (np.linalg.norm(tr-tl) + np.linalg.norm(br-bl)) / 2.0
-    h = (np.linalg.norm(bl-tl) + np.linalg.norm(br-tr)) / 2.0
-
-    if w < 1e-3 or h < 1e-3:
-        return False
-
-    observed_ratio = w / h
-    expected_ratio = MarkerConfig.DOC_WIDTH / MarkerConfig.DOC_HEIGHT  # ~0.707
-
-    # In portrait: observed ~ expected. In landscape photo: observed ~ 1/expected.
-    err1 = abs(observed_ratio - expected_ratio) / expected_ratio
-    err2 = abs(observed_ratio - 1.0/expected_ratio) / (1.0/expected_ratio)
-
-    return min(err1, err2) <= max_ratio_error
-
-
-def validate_and_clean_markers(
-    detected_img: Dict[str, Tuple[float, float]]
+def filter_markers_by_image_quadrant(
+    raw: Dict[str, Tuple[float, float]],
+    image_w: int,
+    image_h: int,
+    tolerance: float = 0.20,
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Given detected marker centres keyed by corner name, remove any markers
-    that are geometrically inconsistent with the others.
+    Remove any detected marker whose image-space position does not match
+    the expected quadrant for its assigned corner name.
 
-    Algorithm
-    ---------
-    1. If all 4 markers present and form a valid convex quad -> return as-is.
-    2. If all 4 present but quad is invalid: try dropping each marker one at
-       a time and check if the remaining 3 are consistent (can estimate the
-       missing one to form a valid quad). Keep the best 3.
-    3. If 3 markers present: check consistency directly.
-    4. If 2 markers present: return as-is (no validation possible).
+    Each corner must lie in its correct half of the image:
+        top_left     -> x < cx  AND  y < cy
+        top_right    -> x > cx  AND  y < cy
+        bottom_right -> x > cx  AND  y > cy
+        bottom_left  -> x < cx  AND  y > cy
 
-    Returns
-    -------
-    Cleaned dict (may have fewer markers than input if outliers were removed).
+    A tolerance of 20% of the image dimension is allowed so that a slightly
+    off-centre document still passes.
+
+    This is the primary defence against markers from other pages in a stack
+    being assigned the wrong corner role.
+
+    Args:
+        raw:       detected corners {name: (x, y)}
+        image_w:   full image width  in pixels
+        image_h:   full image height in pixels
+        tolerance: fraction of image size allowed past the centre line
+
+    Returns:
+        Filtered dict containing only geometrically plausible corners.
     """
-    valid_names = {"top_left", "top_right", "bottom_right", "bottom_left"}
-    clean = {k: v for k, v in detected_img.items() if k in valid_names}
+    cx = image_w / 2.0
+    cy = image_h / 2.0
+    tol_x = tolerance * image_w
+    tol_y = tolerance * image_h
 
-    if len(clean) < 2:
-        return clean
-
-    if len(clean) == 2:
-        return clean  # nothing to validate
-
-    if len(clean) == 3:
-        # Estimate missing corner and check convexity
-        try:
-            mn, mp = _estimate_missing(clean)
-            test = dict(clean); test[mn] = mp
-            if _is_convex_quad(test) and _aspect_ratio_ok(test):
-                return clean  # all 3 are good
-        except Exception:
-            pass
-        # Try dropping each of the 3 and see if the remaining 2 + estimated
-        # give a better quad -- return the pair that works
-        for drop in list(clean.keys()):
-            remaining = {k: v for k, v in clean.items() if k != drop}
-            try:
-                mn, mp = _estimate_missing(remaining)
-                test = dict(remaining); test[mn] = mp
-                # Still need 4 to check
-                mn2, mp2 = _estimate_missing(test)  # will error if already 4
-            except Exception:
-                pass
-        return clean  # return as-is if we can't improve
-
-    # len == 4
-    if _is_convex_quad(clean) and _aspect_ratio_ok(clean):
-        return clean  # perfect
-
-    # 4 markers but invalid quad: try dropping each one
-    best_clean = None
-    best_score = float('inf')
-
-    for drop in list(clean.keys()):
-        candidate = {k: v for k, v in clean.items() if k != drop}
-        try:
-            mn, mp = _estimate_missing(candidate)
-            test = dict(candidate); test[mn] = mp
-            if _is_convex_quad(test) and _aspect_ratio_ok(test):
-                # Score = distance the dropped marker is from its estimated position
-                score = np.linalg.norm(
-                    np.array(clean[drop]) - np.array(test[drop])
-                )
-                if score < best_score:
-                    best_score = score
-                    best_clean = candidate
-        except Exception:
+    kept: Dict[str, Tuple[float, float]] = {}
+    for name, (x, y) in raw.items():
+        expected_h, expected_v = _CORNER_QUADRANT.get(name, (None, None))
+        if expected_h is None:
             continue
 
-    if best_clean is not None:
-        dropped = set(clean.keys()) - set(best_clean.keys())
-        print(f"  [validate_markers] Dropped outlier marker: {dropped} "
-              f"(error={best_score:.1f}px)")
-        return best_clean
+        ok_h = (x <= cx + tol_x) if expected_h == "left" else (x >= cx - tol_x)
+        ok_v = (y <= cy + tol_y) if expected_v == "top"  else (y >= cy - tol_y)
 
-    # Could not fix by dropping one — return original and let caller handle
-    return clean
+        if ok_h and ok_v:
+            kept[name] = (x, y)
+        else:
+            print(f"  [quadrant_filter] Rejected '{name}' at ({x:.0f},{y:.0f}) "
+                  f"-- expected {expected_h}/{expected_v} quadrant "
+                  f"(image centre {cx:.0f},{cy:.0f})")
+    return kept
 
 
 def _estimate_missing(
     detected: Dict[str, Tuple[float, float]]
 ) -> Tuple[str, Tuple[float, float]]:
-    """Internal helper: estimate missing corner from 3 detected ones."""
+    """Estimate the one missing corner from 3 known ones using diagonal rule."""
     all_corners = {"top_left", "top_right", "bottom_right", "bottom_left"}
     missing_name = (all_corners - set(detected.keys())).pop()
     tl = detected.get("top_left")
@@ -326,15 +202,30 @@ def _estimate_missing(
     return missing_name, est
 
 
+def _is_convex_quad(pts: Dict[str, Tuple[float, float]]) -> bool:
+    """Return True if the 4 corners form a convex quad in correct spatial order."""
+    required = {"top_left", "top_right", "bottom_right", "bottom_left"}
+    if not required.issubset(pts.keys()):
+        return False
+    tl = np.array(pts["top_left"],     dtype=np.float64)
+    tr = np.array(pts["top_right"],    dtype=np.float64)
+    br = np.array(pts["bottom_right"], dtype=np.float64)
+    bl = np.array(pts["bottom_left"],  dtype=np.float64)
+    poly = [tl, tr, br, bl]
+    cross_signs = []
+    n = len(poly)
+    for i in range(n):
+        p0, p1, p2 = poly[i], poly[(i+1)%n], poly[(i+2)%n]
+        cross = (p1[0]-p0[0])*(p2[1]-p1[1]) - (p1[1]-p0[1])*(p2[0]-p1[0])
+        cross_signs.append(np.sign(cross))
+    return len(set(cross_signs)) == 1
+
+
 # ===========================================================================
 # CoordinateMapper
 # ===========================================================================
 
 class CoordinateMapper:
-    """
-    Transforms coordinates between the original document space and a captured
-    image using ArUco markers.
-    """
 
     @staticmethod
     def calculate_original_marker_positions() -> Dict:
@@ -357,7 +248,6 @@ class CoordinateMapper:
     def estimate_missing_corner_3_markers(
         detected: Dict[str, Tuple[float, float]]
     ) -> Tuple[str, Tuple[float, float]]:
-        """Estimate missing 4th corner: TL+BR = TR+BL -> missing = A+C-B."""
         if len(detected) < 3:
             raise ValueError("Need at least 3 detected corners.")
         return _estimate_missing(detected)
@@ -366,7 +256,6 @@ class CoordinateMapper:
     def reconstruct_from_two_markers(
         detected: Dict[str, Tuple[float, float]]
     ) -> Dict[str, Tuple[float, float]]:
-        """Reconstruct all 4 corners from 2 markers via similarity transform."""
         if len(detected) < 2:
             raise ValueError("Need at least 2 detected corners.")
         original_positions = CoordinateMapper.calculate_original_marker_positions()
@@ -397,6 +286,107 @@ class CoordinateMapper:
         return all_corners
 
     # ------------------------------------------------------------------
+    # Core: resolve + validate all 4 corner positions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def resolve_corners(
+        detected_markers: List[Dict],
+        corners_data: List[np.ndarray],
+        image_w: int = 0,
+        image_h: int = 0,
+    ) -> Tuple[Dict[str, Tuple[float, float]], set]:
+        """
+        Collect detected marker centres, validate them with quadrant filtering,
+        then fill any missing corners by geometric estimation.
+
+        Validation pipeline
+        -------------------
+        Step 1 — Quadrant filter (primary defence):
+            Each corner is only kept if it lies in the correct spatial quadrant
+            of the image. A marker labelled 'bottom_left' that appears in the
+            top half of the photo is rejected immediately, regardless of which
+            ArUco ID was decoded. This eliminates markers from other pages in
+            a stack, which are the most common source of false detections.
+
+        Step 2 — Convexity check (secondary defence):
+            If all 4 survived step 1, verify they form a convex quad. If not,
+            try dropping each one and re-estimating; keep the set that produces
+            the most convex arrangement.
+
+        Step 3 — Estimation:
+            Fill any remaining missing corners (3 known -> parallelogram rule,
+            2 known -> similarity transform).
+
+        Args:
+            detected_markers: List of marker dicts with 'corner' key.
+            corners_data:     Parallel list of ArUco corner arrays.
+            image_w / image_h: Image dimensions for quadrant filtering.
+                               If 0, quadrant filter is skipped.
+
+        Returns:
+            (all_corners_img, estimated_names)
+        """
+        original_positions = CoordinateMapper.calculate_original_marker_positions()
+
+        # Collect raw detections
+        raw: Dict[str, Tuple[float, float]] = {}
+        for i, mi in enumerate(detected_markers):
+            cn = mi.get("corner")
+            if cn not in original_positions:
+                continue
+            raw[cn] = CoordinateMapper.calculate_marker_center(corners_data[i][0])
+
+        print(f"  Raw detections: {sorted(raw.keys())}")
+
+        # Step 1: quadrant filter
+        if image_w > 0 and image_h > 0:
+            clean = filter_markers_by_image_quadrant(raw, image_w, image_h)
+        else:
+            clean = dict(raw)
+
+        print(f"  After quadrant filter: {sorted(clean.keys())}")
+
+        # Step 2: convexity check on 4 markers
+        if len(clean) == 4 and not _is_convex_quad(clean):
+            print("  4 markers not convex — trying to drop outlier...")
+            best, best_score = None, float('inf')
+            for drop in list(clean.keys()):
+                candidate = {k: v for k, v in clean.items() if k != drop}
+                mn, mp = _estimate_missing(candidate)
+                test = dict(candidate); test[mn] = mp
+                if _is_convex_quad(test):
+                    # Score: distance of dropped marker from its estimated position
+                    score = np.linalg.norm(np.array(clean[drop]) - np.array(test[drop]))
+                    if score < best_score:
+                        best_score = score
+                        best = (candidate, drop)
+            if best is not None:
+                clean, dropped = best
+                print(f"  Dropped outlier '{dropped}' (err={best_score:.1f}px)")
+
+        n = len(clean)
+        if n < 2:
+            raise ValueError(f"Only {n} valid marker(s) after filtering — cannot proceed.")
+
+        # Step 3: estimate missing corners
+        estimated_names: set = set()
+        all_corners_img: Dict[str, Tuple[float, float]] = {}
+
+        if n >= 4:
+            all_corners_img = dict(clean)
+        elif n == 3:
+            mn, mp = _estimate_missing(clean)
+            all_corners_img = dict(clean)
+            all_corners_img[mn] = mp
+            estimated_names.add(mn)
+        else:  # n == 2
+            all_corners_img = CoordinateMapper.reconstruct_from_two_markers(clean)
+            estimated_names = set(all_corners_img.keys()) - set(clean.keys())
+
+        return all_corners_img, estimated_names
+
+    # ------------------------------------------------------------------
     # Document boundary from marker geometry
     # ------------------------------------------------------------------
 
@@ -405,13 +395,9 @@ class CoordinateMapper:
         all_corners_img: Dict[str, Tuple[float, float]]
     ) -> List[Tuple[float, float]]:
         """
-        Compute true document boundary corners in IMAGE space.
-
-        Each marker centre is offset = MARGIN + MARKER_SIZE/2 from the
-        nearest page edge. We step each marker outward along locally-measured
-        axis directions by this offset (scaled to image-px).
-
-        Returns [TL, TR, BR, BL] as float tuples.
+        Step each marker outward by MARGIN + MARKER_SIZE/2 along the locally
+        measured document axes to reach the true page edges.
+        Returns [TL, TR, BR, BL] in image space.
         """
         required = {"top_left", "top_right", "bottom_right", "bottom_left"}
         if not required.issubset(all_corners_img.keys()):
@@ -449,57 +435,32 @@ class CoordinateMapper:
         delta_h = offset_doc * h_scale * h_hat
         delta_v = offset_doc * v_scale * v_hat
 
-        doc_tl = tl - delta_h - delta_v
-        doc_tr = tr + delta_h - delta_v
-        doc_br = br + delta_h + delta_v
-        doc_bl = bl - delta_h + delta_v
-
         return [
-            (float(doc_tl[0]), float(doc_tl[1])),
-            (float(doc_tr[0]), float(doc_tr[1])),
-            (float(doc_br[0]), float(doc_br[1])),
-            (float(doc_bl[0]), float(doc_bl[1])),
+            (float((tl - delta_h - delta_v)[0]), float((tl - delta_h - delta_v)[1])),
+            (float((tr + delta_h - delta_v)[0]), float((tr + delta_h - delta_v)[1])),
+            (float((br + delta_h + delta_v)[0]), float((br + delta_h + delta_v)[1])),
+            (float((bl - delta_h + delta_v)[0]), float((bl - delta_h + delta_v)[1])),
         ]
 
     # ------------------------------------------------------------------
-    # Homography (doc-space -> image-space, for point mapping only)
+    # Homography (doc -> image, for point/zone mapping only)
     # ------------------------------------------------------------------
 
     @staticmethod
     def compute_homography(
         detected_markers: List[Dict],
         corners_data: List[np.ndarray],
-        vis_image: Optional[np.ndarray] = None,
+        image_w: int = 0,
+        image_h: int = 0,
     ) -> Optional[np.ndarray]:
-        """
-        Compute H such that H @ doc_point -> image_point.
-        Used by map_point_to_image / map_points_to_image.
-        NOT used for dewarping (see dewarp_document).
-        """
+        """Compute H: doc_point -> image_point (for overlay use, not dewarping)."""
         original_positions = CoordinateMapper.calculate_original_marker_positions()
-        detected_img: Dict[str, Tuple[float, float]] = {}
-        for i, marker_info in enumerate(detected_markers):
-            corner_name = marker_info.get("corner")
-            if corner_name not in original_positions:
-                continue
-            detected_img[corner_name] = CoordinateMapper.calculate_marker_center(
-                corners_data[i][0]
+        try:
+            all_img, _ = CoordinateMapper.resolve_corners(
+                detected_markers, corners_data, image_w, image_h
             )
-
-        # Validate and clean markers before using them
-        detected_img = validate_and_clean_markers(detected_img)
-        n_valid = len(detected_img)
-
-        if n_valid < 2:
+        except ValueError:
             return None
-
-        if n_valid >= 4:
-            all_img = detected_img
-        elif n_valid == 3:
-            mn, mp = _estimate_missing(detected_img)
-            all_img = dict(detected_img); all_img[mn] = mp
-        else:
-            all_img = CoordinateMapper.reconstruct_from_two_markers(detected_img)
 
         src_points, dst_points = [], []
         for corner_name in CORNER_ORDER:
@@ -511,11 +472,10 @@ class CoordinateMapper:
         if len(src_points) < 4:
             return None
 
-        method = cv2.RANSAC if n_valid >= 4 else 0
         H, _ = cv2.findHomography(
             np.array(src_points, dtype=np.float32),
             np.array(dst_points, dtype=np.float32),
-            method, ransacReprojThreshold=5.0,
+            0,
         )
         return H
 
@@ -529,61 +489,7 @@ class CoordinateMapper:
         return CoordinateMapper.compute_homography(
             scan_result["detected_markers"],
             scan_result["corners"],
-            vis_image=vis_image,
         )
-
-    # ------------------------------------------------------------------
-    # Core: resolve + validate all 4 corner positions
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def resolve_corners(
-        detected_markers: List[Dict],
-        corners_data: List[np.ndarray],
-    ) -> Tuple[Dict[str, Tuple[float, float]], set]:
-        """
-        Collect detected marker centres, validate them, and fill in missing
-        corners by estimation.
-
-        Returns
-        -------
-        all_corners_img : dict  -- all 4 corner names -> (x, y) image coords
-        estimated_names : set   -- corners that were estimated (not measured)
-
-        Raises ValueError if fewer than 2 valid markers remain after cleaning.
-        """
-        original_positions = CoordinateMapper.calculate_original_marker_positions()
-
-        # Collect raw detections
-        raw: Dict[str, Tuple[float, float]] = {}
-        for i, mi in enumerate(detected_markers):
-            cn = mi.get("corner")
-            if cn not in original_positions:
-                continue
-            raw[cn] = CoordinateMapper.calculate_marker_center(corners_data[i][0])
-
-        # Validate: remove geometrically inconsistent markers
-        clean = validate_and_clean_markers(raw)
-        n = len(clean)
-
-        if n < 2:
-            raise ValueError(f"Only {n} valid marker(s) after cleaning -- cannot proceed.")
-
-        estimated_names: set = set()
-        all_corners_img: Dict[str, Tuple[float, float]] = {}
-
-        if n >= 4:
-            all_corners_img = dict(clean)
-        elif n == 3:
-            mn, mp = _estimate_missing(clean)
-            all_corners_img = dict(clean)
-            all_corners_img[mn] = mp
-            estimated_names.add(mn)
-        else:  # n == 2
-            all_corners_img = CoordinateMapper.reconstruct_from_two_markers(clean)
-            estimated_names = set(all_corners_img.keys()) - set(clean.keys())
-
-        return all_corners_img, estimated_names
 
     # ------------------------------------------------------------------
     # Dewarping
@@ -596,14 +502,9 @@ class CoordinateMapper:
     ) -> Optional[np.ndarray]:
         """
         Perspective-correct the document.
-
-        Builds H as:
-            src = document-boundary corners in IMAGE space
-            dst = output canvas corners (0,0 -> DOC_W, DOC_H)
-        Calls warpPerspective directly -- no matrix inversion.
-        Auto-detects and corrects landscape orientation.
-
-        Returns BGR numpy array (DOC_HEIGHT x DOC_WIDTH) or None.
+        src = boundary corners in image space -> dst = canvas corners.
+        Auto-corrects portrait/landscape orientation.
+        Returns BGR array (DOC_HEIGHT x DOC_WIDTH).
         """
         try:
             boundary = CoordinateMapper.compute_document_boundary_from_markers(
@@ -620,14 +521,13 @@ class CoordinateMapper:
         tl, tr, br, bl = [np.array(p, dtype=np.float64) for p in boundary]
         h_span = (np.linalg.norm(tr-tl) + np.linalg.norm(br-bl)) / 2.0
         v_span = (np.linalg.norm(bl-tl) + np.linalg.norm(br-tr)) / 2.0
-        paper_is_portrait = v_span >= h_span
+        portrait = v_span >= h_span
 
-        if paper_is_portrait:
-            dst = np.array([[0,0],[W,0],[W,H],[0,H]], dtype=np.float32)
+        if portrait:
+            dst      = np.array([[0,0],[W,0],[W,H],[0,H]], dtype=np.float32)
             out_size = (int(W), int(H))
         else:
-            # Paper on its side -> rotate output so portrait is upright
-            dst = np.array([[0,0],[0,H],[W,H],[W,0]], dtype=np.float32)
+            dst      = np.array([[0,0],[0,H],[W,H],[W,0]], dtype=np.float32)
             out_size = (int(H), int(W))
 
         H_mat, _ = cv2.findHomography(src, dst, 0)
@@ -639,11 +539,8 @@ class CoordinateMapper:
                                      borderMode=cv2.BORDER_CONSTANT,
                                      borderValue=(255, 255, 255))
 
-        # Ensure portrait output
         if warped.shape[1] > warped.shape[0]:
             warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
-
-        # Resize to exact doc dimensions
         if warped.shape[1] != int(W) or warped.shape[0] != int(H):
             warped = cv2.resize(warped, (int(W), int(H)), interpolation=cv2.INTER_LINEAR)
 
@@ -656,19 +553,8 @@ class CoordinateMapper:
         all_corners_img: Optional[Dict[str, Tuple[float, float]]] = None,
         vis_image: Optional[np.ndarray] = None,
     ) -> Optional[Image.Image]:
-        """
-        Extract and perspective-correct the document (public API).
-
-        Args:
-            image:           PIL RGB image of the raw photo.
-            scan_result:     Result dict from ExamScanner.scan_page().
-            all_corners_img: Pre-computed corners (from resolve_corners).
-                             If None, computed internally from scan_result.
-            vis_image:       Unused (kept for API compatibility).
-        """
         if not scan_result.get("success", False):
             return None
-
         if all_corners_img is None:
             try:
                 all_corners_img, _ = CoordinateMapper.resolve_corners(
@@ -685,7 +571,6 @@ class CoordinateMapper:
         warped = CoordinateMapper.dewarp_document(image_bgr, all_corners_img)
         if warped is None:
             return None
-
         return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
 
     # ------------------------------------------------------------------
@@ -705,7 +590,7 @@ class CoordinateMapper:
         return H_mat
 
     # ------------------------------------------------------------------
-    # Coordinate mapping (for overlay / OCR zone mapping)
+    # Point mapping (for OCR zone overlay)
     # ------------------------------------------------------------------
 
     @staticmethod

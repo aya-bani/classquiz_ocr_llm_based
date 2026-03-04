@@ -33,6 +33,9 @@ class LayoutConfig:
     GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")  # Set your API key in .env file
     GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
+    OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
+    OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
+
     SIMILARITY_THRESHOLD = 70
     KEY_WORDS = ["تعليمة", "سند"]
     EXCLUDED_KEYWORDS = ["تسند"]

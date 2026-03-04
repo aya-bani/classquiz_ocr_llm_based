@@ -33,7 +33,7 @@ ImageCropping = image_cropping.ImageCropping
 def run_test():
     logger = LoggerManager.get_logger(__name__)
 
-    pdf_path = Path("Exams/3ème année/arabe/corr3arlangt1d2.pdf")
+    pdf_path = Path("Exams/3ème année/arabe/corr3arprodt1d2.pdf")
     if not pdf_path.exists():
         logger.error(f"PDF not found: {pdf_path}")
         print(f"ERROR: PDF not found: {pdf_path}")

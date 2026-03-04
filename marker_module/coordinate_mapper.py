@@ -11,15 +11,16 @@ Homography robustness tiers
     0-1 marker -> fall back to blue-boundary extraction from visualisation
 
 Document boundary computation
-    The visible document boundary is NOT computed by mapping abstract (0,0)
-    corners through the homography. Instead it is derived directly from the
-    marker centers in image space using the known physical offset:
+    The visible document boundary is derived directly from marker centres
+    using the known physical offset (MARGIN + MARKER_SIZE/2), NOT by
+    mapping abstract (0,0) corners through the homography.
 
-        offset = MARGIN + MARKER_SIZE / 2   (pixels in document space)
-
-    This offset is converted to image-space vectors by reading the local axis
-    directions from the marker layout, so the quad remains geometrically
-    consistent even when corners are reconstructed from 2 or 3 markers.
+Dewarping
+    warpPerspective is called with a homography built as:
+        src = the 4 boundary corners in IMAGE space   (where the paper is)
+        dst = the 4 corners of the output canvas      (0,0 -> W,H)
+    This maps image pixels -> flat document pixels directly, with no
+    matrix inversion needed and no orientation ambiguity.
 """
 
 import cv2
@@ -29,7 +30,6 @@ from .marker_config import MarkerConfig
 from PIL import Image
 
 
-# Corner ordering: TL -> TR -> BR -> BL throughout this module
 CORNER_ORDER = ["top_left", "top_right", "bottom_right", "bottom_left"]
 
 
@@ -37,14 +37,13 @@ CORNER_ORDER = ["top_left", "top_right", "bottom_right", "bottom_left"]
 # Blue-boundary detection helpers
 # ===========================================================================
 
-_BLUE_H_LOW  = 95    # HSV hue lower bound for the drawn blue polyline
-_BLUE_H_HIGH = 135   # HSV hue upper bound
-_BLUE_S_LOW  = 80    # reject near-grey pixels
-_BLUE_V_LOW  = 80    # reject dark regions (shadows, ArUco markers)
+_BLUE_H_LOW  = 95
+_BLUE_H_HIGH = 135
+_BLUE_S_LOW  = 80
+_BLUE_V_LOW  = 80
 
 
 def _bb_threshold_blue(image_bgr: np.ndarray) -> np.ndarray:
-    """Binary mask of blue pixels via HSV thresholding (lighting-robust)."""
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     lower = np.array([_BLUE_H_LOW,  _BLUE_S_LOW, _BLUE_V_LOW], dtype=np.uint8)
     upper = np.array([_BLUE_H_HIGH, 255,          255         ], dtype=np.uint8)
@@ -52,13 +51,11 @@ def _bb_threshold_blue(image_bgr: np.ndarray) -> np.ndarray:
 
 
 def _bb_close_gaps(mask: np.ndarray, kernel_size: int = 15) -> np.ndarray:
-    """Morphological closing: bridges anti-aliasing gaps without moving the boundary."""
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
 def _bb_largest_contour(mask: np.ndarray) -> Optional[np.ndarray]:
-    """Return the largest external contour (the document boundary is always dominant)."""
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
@@ -66,17 +63,11 @@ def _bb_largest_contour(mask: np.ndarray) -> Optional[np.ndarray]:
 
 
 def _bb_approximate_polygon(contour: np.ndarray, epsilon_factor: float = 0.02) -> np.ndarray:
-    """Ramer-Douglas-Peucker simplification; epsilon = 2% of perimeter."""
     peri = cv2.arcLength(contour, closed=True)
     return cv2.approxPolyDP(contour, epsilon_factor * peri, closed=True)
 
 
 def _bb_reconstruct_missing_corner(pts: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """
-    Given 3 quad corners, estimate the 4th via the parallelogram diagonal rule:
-        missing = A + C - B  (from TL + BR = TR + BL)
-    Points are assigned to quadrants via the centroid before applying the formula.
-    """
     arr = np.array(pts, dtype=np.float64)
     cx, cy = arr.mean(axis=0)
     quadrants: Dict[str, Tuple[int, int]] = {}
@@ -90,8 +81,8 @@ def _bb_reconstruct_missing_corner(pts: List[Tuple[int, int]]) -> List[Tuple[int
     tr = quadrants.get("top_right",    (0, 0))
     br = quadrants.get("bottom_right", (0, 0))
     bl = quadrants.get("bottom_left",  (0, 0))
-    def add(a, b): return (a[0] + b[0], a[1] + b[1])
-    def sub(a, b): return (a[0] - b[0], a[1] - b[1])
+    def add(a, b): return (a[0]+b[0], a[1]+b[1])
+    def sub(a, b): return (a[0]-b[0], a[1]-b[1])
     if missing_name == "top_left":       est = add(sub(tr, br), bl)
     elif missing_name == "top_right":    est = add(sub(tl, bl), br)
     elif missing_name == "bottom_right": est = add(sub(tr, tl), bl)
@@ -102,11 +93,9 @@ def _bb_reconstruct_missing_corner(pts: List[Tuple[int, int]]) -> List[Tuple[int
 
 
 def _bb_select_four_extreme_points(points: np.ndarray) -> List[Tuple[int, int]]:
-    """From >4 hull points, pick the 4 closest to the bounding-box corners."""
     x_min, y_min = points.min(axis=0)
     x_max, y_max = points.max(axis=0)
-    bbox = np.array([[x_min, y_min], [x_max, y_min],
-                     [x_max, y_max], [x_min, y_max]], dtype=np.float64)
+    bbox = np.array([[x_min,y_min],[x_max,y_min],[x_max,y_max],[x_min,y_max]], dtype=np.float64)
     selected = []
     for bp in bbox:
         dists = np.linalg.norm(points.astype(np.float64) - bp, axis=1)
@@ -115,32 +104,16 @@ def _bb_select_four_extreme_points(points: np.ndarray) -> List[Tuple[int, int]]:
 
 
 def _bb_order_corners(pts: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """Order 4 points as [TL, TR, BR, BL] via min/max of sum and difference."""
     arr = np.array(pts, dtype=np.int32)
     s = arr.sum(axis=1)
     d = np.diff(arr, axis=1).ravel()
-    return [tuple(arr[np.argmin(s)].tolist()),   # TL: min(x+y)
-            tuple(arr[np.argmin(d)].tolist()),   # TR: min(x-y)
-            tuple(arr[np.argmax(s)].tolist()),   # BR: max(x+y)
-            tuple(arr[np.argmax(d)].tolist())]   # BL: max(x-y)
+    return [tuple(arr[np.argmin(s)].tolist()),
+            tuple(arr[np.argmin(d)].tolist()),
+            tuple(arr[np.argmax(s)].tolist()),
+            tuple(arr[np.argmax(d)].tolist())]
 
 
 def extract_blue_boundary(image: np.ndarray) -> Optional[List[Tuple[int, int]]]:
-    """
-    Detect the blue document-boundary quadrilateral drawn by cv2.polylines
-    and return its 4 ordered corner points [TL, TR, BR, BL], or None.
-
-    Pipeline
-    --------
-    1. HSV colour threshold   -> isolates blue pixels
-    2. Morphological closing  -> heals anti-aliasing / drawing gaps
-    3. Largest contour        -> selects the document boundary blob
-    4. Polygon approximation  -> collapses edge pixels to corner points
-    5. Hull fallback          -> handles irregular approximation results
-    6. 3-point reconstruction -> recovers a missing corner if needed
-    7. 4-extreme selection    -> reduces hull with > 4 points
-    8. Corner ordering        -> returns [TL, TR, BR, BL]
-    """
     mask = _bb_threshold_blue(image)
     mask = _bb_close_gaps(mask, kernel_size=15)
     contour = _bb_largest_contour(mask)
@@ -171,78 +144,30 @@ class CoordinateMapper:
     """
     Transforms coordinates between the original document space and a captured
     image using ArUco markers.
-
-    Homography robustness tiers:
-        4 markers -> standard homography + RANSAC
-        3 markers -> parallelogram rule for missing corner
-        2 markers -> similarity transform reconstruction
-        0-1 marker + vis_image -> blue-boundary fallback
-
-    Key method for visualisation:
-        compute_document_boundary_from_markers(all_corners_img)
-            Derives the true page boundary directly from marker positions
-            and known geometry -- NO dependency on the homography matrix.
     """
-
-    # ------------------------------------------------------------------
-    # Original document geometry helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def calculate_original_marker_positions() -> Dict:
-        """
-        Return the center positions of the 4 ArUco markers in the original
-        document coordinate system, keyed by corner name.
-        """
         m = MarkerConfig.MARGIN
         s = MarkerConfig.MARKER_SIZE
         W = MarkerConfig.DOC_WIDTH
         H = MarkerConfig.DOC_HEIGHT
         return {
-            "top_left": {
-                "center": (m + s / 2, m + s / 2),
-                "corners": [(m, m), (m+s, m), (m+s, m+s), (m, m+s)],
-            },
-            "top_right": {
-                "center": (W - m - s/2, m + s/2),
-                "corners": [(W-m-s, m), (W-m, m), (W-m, m+s), (W-m-s, m+s)],
-            },
-            "bottom_left": {
-                "center": (m + s/2, H - m - s/2),
-                "corners": [(m, H-m-s), (m+s, H-m-s), (m+s, H-m), (m, H-m)],
-            },
-            "bottom_right": {
-                "center": (W - m - s/2, H - m - s/2),
-                "corners": [(W-m-s, H-m-s), (W-m, H-m-s), (W-m, H-m), (W-m-s, H-m)],
-            },
+            "top_left":     {"center": (m+s/2,   m+s/2),   "corners": [(m,m),(m+s,m),(m+s,m+s),(m,m+s)]},
+            "top_right":    {"center": (W-m-s/2, m+s/2),   "corners": [(W-m-s,m),(W-m,m),(W-m,m+s),(W-m-s,m+s)]},
+            "bottom_left":  {"center": (m+s/2,   H-m-s/2), "corners": [(m,H-m-s),(m+s,H-m-s),(m+s,H-m),(m,H-m)]},
+            "bottom_right": {"center": (W-m-s/2, H-m-s/2), "corners": [(W-m-s,H-m-s),(W-m,H-m-s),(W-m,H-m),(W-m-s,H-m)]},
         }
 
     @staticmethod
     def calculate_marker_center(corners: np.ndarray) -> Tuple[float, float]:
-        """Return the centroid of an ArUco marker corner array (shape 4x2)."""
         return (float(np.mean(corners[:, 0])), float(np.mean(corners[:, 1])))
-
-    # ------------------------------------------------------------------
-    # Missing-corner estimation (ArUco path)
-    # ------------------------------------------------------------------
 
     @staticmethod
     def estimate_missing_corner_3_markers(
         detected: Dict[str, Tuple[float, float]]
     ) -> Tuple[str, Tuple[float, float]]:
-        """
-        Estimate the missing 4th corner using the parallelogram diagonal rule:
-
-            TL + BR = TR + BL   ->   missing = A + C - B
-
-        Exact for parallelograms; best linear approximation under perspective.
-
-        Args:
-            detected: dict mapping corner name -> (img_x, img_y) for 3 corners.
-
-        Returns:
-            Tuple (missing_corner_name, (estimated_x, estimated_y)).
-        """
+        """Estimate missing 4th corner: TL+BR = TR+BL -> missing = A+C-B."""
         if len(detected) < 3:
             raise ValueError("Need at least 3 detected corners.")
         all_corners = {"top_left", "top_right", "bottom_right", "bottom_left"}
@@ -251,8 +176,8 @@ class CoordinateMapper:
         tr = detected.get("top_right")
         br = detected.get("bottom_right")
         bl = detected.get("bottom_left")
-        def add(a, b): return (a[0] + b[0], a[1] + b[1])
-        def sub(a, b): return (a[0] - b[0], a[1] - b[1])
+        def add(a, b): return (a[0]+b[0], a[1]+b[1])
+        def sub(a, b): return (a[0]-b[0], a[1]-b[1])
         if missing_name == "top_left":       estimated = add(sub(tr, br), bl)
         elif missing_name == "top_right":    estimated = add(sub(tl, bl), br)
         elif missing_name == "bottom_right": estimated = add(sub(tr, tl), bl)
@@ -263,25 +188,7 @@ class CoordinateMapper:
     def reconstruct_from_two_markers(
         detected: Dict[str, Tuple[float, float]]
     ) -> Dict[str, Tuple[float, float]]:
-        """
-        Reconstruct all 4 corner positions from 2 detected markers using a
-        similarity transform (rotation + uniform scale) built from the known
-        document-space layout.
-
-        The similarity matrix M satisfies  M @ (Q_doc - P_doc) = Q_img - P_img
-        and is the unique rotation+scale solution for that single vector pair:
-
-            M = (1/|u|^2) * [[ u.v,  -u_perp.v ],
-                              [ u_perp.v,  u.v  ]]
-
-        where u = Q_doc - P_doc,  v = Q_img - P_img,  u_perp = (-u_y, u_x).
-
-        Args:
-            detected: dict mapping corner name -> (img_x, img_y) for 2 corners.
-
-        Returns:
-            Dict mapping all 4 corner names -> (img_x, img_y).
-        """
+        """Reconstruct all 4 corners from 2 markers via similarity transform."""
         if len(detected) < 2:
             raise ValueError("Need at least 2 detected corners.")
         original_positions = CoordinateMapper.calculate_original_marker_positions()
@@ -295,11 +202,10 @@ class CoordinateMapper:
         v = Q_img - P_img
         u_norm_sq = float(np.dot(u, u))
         if u_norm_sq < 1e-6:
-            raise ValueError("The two detected markers are too close in document space.")
+            raise ValueError("Markers too close in document space.")
         u_perp = np.array([-u[1], u[0]], dtype=np.float64)
         dot_uv      = float(np.dot(u, v))
         dot_uperp_v = float(np.dot(u_perp, v))
-        # 2x2 similarity matrix: doc_offset -> img_offset
         M = np.array([[dot_uv, -dot_uperp_v],
                       [dot_uperp_v, dot_uv]], dtype=np.float64) / u_norm_sq
         all_corners: Dict[str, Tuple[float, float]] = {}
@@ -307,15 +213,13 @@ class CoordinateMapper:
             if corner_name in detected:
                 all_corners[corner_name] = detected[corner_name]
             else:
-                doc_center = np.array(
-                    original_positions[corner_name]["center"], dtype=np.float64
-                )
-                estimated = P_img + M @ (doc_center - P_doc)
+                doc_center = np.array(original_positions[corner_name]["center"], dtype=np.float64)
+                estimated  = P_img + M @ (doc_center - P_doc)
                 all_corners[corner_name] = (float(estimated[0]), float(estimated[1]))
         return all_corners
 
     # ------------------------------------------------------------------
-    # Geometric document boundary (core new method)
+    # Document boundary from marker geometry
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -323,120 +227,50 @@ class CoordinateMapper:
         all_corners_img: Dict[str, Tuple[float, float]]
     ) -> List[Tuple[float, float]]:
         """
-        Compute the true document boundary quad in IMAGE space directly from
-        the four marker center positions and the known physical geometry.
+        Compute true document boundary corners in IMAGE space.
 
-        Geometric principle
-        -------------------
-        Each marker center is exactly:
+        Each marker centre is offset = MARGIN + MARKER_SIZE/2 = 54 doc-px
+        from the nearest page edge. We step each marker outward along the
+        locally measured axis directions by this offset (scaled to image-px).
 
-            offset = MARGIN + MARKER_SIZE / 2
-
-        away from the nearest true page edge along both axes.
-        With MARGIN=24, MARKER_SIZE=60:  offset = 54 document-pixels.
-
-        Under perspective, the document axes are no longer axis-aligned,
-        so we must convert the offset into image-space displacement vectors.
-
-        Step 1 -- Axis directions
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~
-        Derive unit vectors for the horizontal and vertical document axes
-        directly from the marker quad, averaging both parallel edges:
-
-            h_raw = mean( (TR-TL), (BR-BL) )   -> horizontal axis
-            v_raw = mean( (BL-TL), (BR-TR) )   -> vertical axis
-
-        Averaging both parallel edges reduces single-marker noise and adapts
-        to perspective foreshortening.
-
-        Step 2 -- Scale  (image-px / doc-px)
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        Known center-to-center distances in document space:
-
-            inter_h_doc = DOC_WIDTH  - 2 * offset  =  1654 - 108 = 1546
-            inter_v_doc = DOC_HEIGHT - 2 * offset  =  2338 - 108 = 2230
-
-        Measured in image space (average of both parallel edges):
-
-            h_scale = mean(|TR-TL|, |BR-BL|) / inter_h_doc
-            v_scale = mean(|BL-TL|, |BR-TR|) / inter_v_doc
-
-        Step 3 -- Displacement vectors
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            delta_h = offset * h_scale * h_hat
-            delta_v = offset * v_scale * v_hat
-
-        Step 4 -- True document corners
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            doc_TL = marker_TL - delta_h - delta_v
-            doc_TR = marker_TR + delta_h - delta_v
-            doc_BR = marker_BR + delta_h + delta_v
-            doc_BL = marker_BL - delta_h + delta_v
-
-        Properties
-        ----------
-        * Exact when all 4 markers are detected.
-        * Stable under 2/3-marker reconstruction because it depends only on
-          image-space marker positions and known document geometry.
-        * Never touches the homography matrix -> no extrapolation drift.
-        * Correct under perspective: axis directions adapt to local skew.
-
-        Args:
-            all_corners_img: Dict mapping all 4 corner names to their
-                             (x, y) image-space positions (real or estimated).
-
-        Returns:
-            List of 4 (x, y) float tuples ordered [TL, TR, BR, BL]
-            representing the true document page boundary in image space.
-
-        Raises:
-            ValueError if a corner is missing or the layout is degenerate.
+        Returns [TL, TR, BR, BL] as float tuples in image space.
         """
         required = {"top_left", "top_right", "bottom_right", "bottom_left"}
         if not required.issubset(all_corners_img.keys()):
-            raise ValueError(
-                f"Need all 4 corners, got {set(all_corners_img.keys())}"
-            )
+            raise ValueError(f"Need all 4 corners, got {set(all_corners_img.keys())}")
 
         tl = np.array(all_corners_img["top_left"],     dtype=np.float64)
         tr = np.array(all_corners_img["top_right"],    dtype=np.float64)
         br = np.array(all_corners_img["bottom_right"], dtype=np.float64)
         bl = np.array(all_corners_img["bottom_left"],  dtype=np.float64)
 
-        # Physical offset: marker center -> true page edge  (doc-px)
-        # MARGIN=24, MARKER_SIZE=60  =>  offset = 54 doc-px
-        offset_doc = MarkerConfig.MARGIN + MarkerConfig.MARKER_SIZE / 2.0
+        offset_doc = MarkerConfig.MARGIN + MarkerConfig.MARKER_SIZE / 2.0  # 54
 
-        # ---- Step 1: axis directions ------------------------------------
-        # Horizontal: average top-edge vector and bottom-edge vector
         h_raw = ((tr - tl) + (br - bl)) / 2.0
         h_len = float(np.linalg.norm(h_raw))
         if h_len < 1e-6:
-            raise ValueError("Degenerate marker layout: zero horizontal span.")
+            raise ValueError("Degenerate layout: zero horizontal span.")
         h_hat = h_raw / h_len
 
-        # Vertical: average left-edge vector and right-edge vector
         v_raw = ((bl - tl) + (br - tr)) / 2.0
         v_len = float(np.linalg.norm(v_raw))
         if v_len < 1e-6:
-            raise ValueError("Degenerate marker layout: zero vertical span.")
+            raise ValueError("Degenerate layout: zero vertical span.")
         v_hat = v_raw / v_len
 
-        # ---- Step 2: scale (img-px per doc-px) -------------------------
-        inter_h_doc = MarkerConfig.DOC_WIDTH  - 2.0 * offset_doc   # 1546 doc-px
-        inter_v_doc = MarkerConfig.DOC_HEIGHT - 2.0 * offset_doc   # 2230 doc-px
+        inter_h_doc = MarkerConfig.DOC_WIDTH  - 2.0 * offset_doc   # 1546
+        inter_v_doc = MarkerConfig.DOC_HEIGHT - 2.0 * offset_doc   # 2230
 
-        h_span_img = (float(np.linalg.norm(tr - tl)) + float(np.linalg.norm(br - bl))) / 2.0
-        v_span_img = (float(np.linalg.norm(bl - tl)) + float(np.linalg.norm(br - tr))) / 2.0
+        h_scale = (
+            (float(np.linalg.norm(tr - tl)) + float(np.linalg.norm(br - bl))) / 2.0
+        ) / inter_h_doc
+        v_scale = (
+            (float(np.linalg.norm(bl - tl)) + float(np.linalg.norm(br - tr))) / 2.0
+        ) / inter_v_doc
 
-        h_scale = h_span_img / inter_h_doc   # img-px / doc-px  (horizontal)
-        v_scale = v_span_img / inter_v_doc   # img-px / doc-px  (vertical)
+        delta_h = offset_doc * h_scale * h_hat
+        delta_v = offset_doc * v_scale * v_hat
 
-        # ---- Step 3: displacement vectors to true page edges ------------
-        delta_h = offset_doc * h_scale * h_hat   # step from marker-x to left/right edge
-        delta_v = offset_doc * v_scale * v_hat   # step from marker-y to top/bottom edge
-
-        # ---- Step 4: true document corners in image space ---------------
         doc_tl = tl - delta_h - delta_v
         doc_tr = tr + delta_h - delta_v
         doc_br = br + delta_h + delta_v
@@ -450,29 +284,7 @@ class CoordinateMapper:
         ]
 
     # ------------------------------------------------------------------
-    # Blue-boundary homography fallback
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def compute_homography_from_blue_boundary(
-        vis_image: np.ndarray,
-    ) -> Optional[np.ndarray]:
-        """
-        Last-resort fallback: recover homography from the blue polyline drawn
-        in a visualisation image when fewer than 2 ArUco markers are available.
-        """
-        corners_img = extract_blue_boundary(vis_image)
-        if corners_img is None:
-            return None
-        W = float(MarkerConfig.DOC_WIDTH)
-        H = float(MarkerConfig.DOC_HEIGHT)
-        src = np.array([(0, 0), (W, 0), (W, H), (0, H)], dtype=np.float32)
-        dst = np.array(corners_img, dtype=np.float32)
-        homography_matrix, _ = cv2.findHomography(src, dst, 0)
-        return homography_matrix
-
-    # ------------------------------------------------------------------
-    # Core homography computation
+    # Homography (doc-space -> image-space, used for point mapping only)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -482,21 +294,10 @@ class CoordinateMapper:
         vis_image: Optional[np.ndarray] = None,
     ) -> Optional[np.ndarray]:
         """
-        Compute a homography matrix from detected ArUco markers.
+        Compute H such that  H @ doc_point -> image_point.
 
-        Dispatch order:
-            n >= 4  -> standard findHomography + RANSAC
-            n == 3  -> parallelogram rule, then findHomography
-            n == 2  -> similarity transform, then findHomography
-            n <= 1  -> blue-boundary fallback (requires vis_image)
-
-        Args:
-            detected_markers: List of dicts with at least a 'corner' key.
-            corners_data:     Parallel list of ArUco corner arrays (N x 1 x 4 x 2).
-            vis_image:        Optional BGR visualisation image for fallback.
-
-        Returns:
-            3x3 homography matrix or None on failure.
+        Used by map_point_to_image / map_points_to_image for overlay drawing.
+        NOT used for dewarping (see dewarp_document instead).
         """
         original_positions = CoordinateMapper.calculate_original_marker_positions()
         detected_img: Dict[str, Tuple[float, float]] = {}
@@ -509,18 +310,13 @@ class CoordinateMapper:
             )
 
         n_valid = len(detected_img)
-
         if n_valid < 2:
-            if vis_image is not None:
-                return CoordinateMapper.compute_homography_from_blue_boundary(vis_image)
             return None
 
         if n_valid >= 4:
             all_img = detected_img
         elif n_valid == 3:
-            missing_name, estimated = (
-                CoordinateMapper.estimate_missing_corner_3_markers(detected_img)
-            )
+            missing_name, estimated = CoordinateMapper.estimate_missing_corner_3_markers(detected_img)
             all_img = dict(detected_img)
             all_img[missing_name] = estimated
         else:
@@ -537,31 +333,19 @@ class CoordinateMapper:
             return None
 
         method = cv2.RANSAC if n_valid >= 4 else 0
-        homography_matrix, _ = cv2.findHomography(
+        H, _ = cv2.findHomography(
             np.array(src_points, dtype=np.float32),
             np.array(dst_points, dtype=np.float32),
             method, ransacReprojThreshold=5.0,
         )
-        return homography_matrix
+        return H
 
     @staticmethod
     def compute_homography_from_scan(
         scan_result: Dict,
         vis_image: Optional[np.ndarray] = None,
     ) -> Optional[np.ndarray]:
-        """
-        Compute homography from an ExamScanner.scan_page() result dict.
-
-        Args:
-            scan_result: Result dictionary from ExamScanner.scan_page().
-            vis_image:   Optional BGR visualisation image for fallback.
-
-        Returns:
-            Homography matrix or None.
-        """
         if not scan_result.get("success", False):
-            return None
-        if scan_result["markers_found"] < 2 and vis_image is None:
             return None
         return CoordinateMapper.compute_homography(
             scan_result["detected_markers"],
@@ -570,89 +354,210 @@ class CoordinateMapper:
         )
 
     # ------------------------------------------------------------------
-    # Coordinate mapping utilities
+    # Dewarping  (the correct approach)
     # ------------------------------------------------------------------
 
     @staticmethod
-    def map_point_to_image(
-        doc_x: float, doc_y: float, homography_matrix: np.ndarray
-    ) -> Optional[Tuple[float, float]]:
+    def dewarp_document(
+        image: np.ndarray,
+        all_corners_img: Dict[str, Tuple[float, float]],
+    ) -> Optional[np.ndarray]:
         """
-        Map a single point from document coordinates to image coordinates.
+        Perspective-correct the document using the 4 boundary corner positions
+        in image space.
+
+        Approach
+        --------
+        Build H as:
+            src = 4 document-boundary corners in IMAGE space  (where the paper is)
+            dst = 4 corners of the output canvas              (0,0 -> W,H)
+
+        Then call warpPerspective(image, H, (W, H)).
+
+        This directly maps image pixels to their correct location in the
+        flattened output -- no matrix inversion, no orientation ambiguity.
+
+        The output canvas is always DOC_WIDTH x DOC_HEIGHT (portrait).
+        If the boundary corners indicate the paper is landscape in the photo
+        (horizontal span > vertical span), we rotate the output 90 degrees
+        so the result is always upright.
 
         Args:
-            doc_x: X coordinate in the original document.
-            doc_y: Y coordinate in the original document.
-            homography_matrix: 3x3 homography matrix.
+            image:           BGR numpy array of the original photo.
+            all_corners_img: Dict with all 4 corner names -> (x, y) in image space.
 
         Returns:
-            (img_x, img_y) or None on failure.
+            BGR numpy array of shape (DOC_HEIGHT, DOC_WIDTH), or None on failure.
         """
-        if homography_matrix is None:
+        try:
+            boundary = CoordinateMapper.compute_document_boundary_from_markers(
+                all_corners_img
+            )
+        except ValueError:
             return None
-        point = np.array([[[doc_x, doc_y]]], dtype=np.float32)
-        transformed = cv2.perspectiveTransform(point, homography_matrix)
-        return (float(transformed[0][0][0]), float(transformed[0][0][1]))
 
-    @staticmethod
-    def map_points_to_image(
-        doc_points: List[Tuple[float, float]], homography_matrix: np.ndarray
-    ) -> Optional[List[Tuple[float, float]]]:
-        """
-        Map multiple points from document coordinates to image coordinates.
+        # boundary = [TL, TR, BR, BL] in image space
+        src = np.array(boundary, dtype=np.float32)   # 4 x 2, image coords
 
-        Args:
-            doc_points: List of (x, y) tuples in document space.
-            homography_matrix: 3x3 homography matrix.
+        W = float(MarkerConfig.DOC_WIDTH)
+        H = float(MarkerConfig.DOC_HEIGHT)
 
-        Returns:
-            List of (img_x, img_y) tuples or None on failure.
-        """
-        if homography_matrix is None:
+        # Detect whether the paper appears landscape in the photo.
+        # Use the horizontal and vertical span of the boundary quad.
+        tl, tr, br, bl = [np.array(p, dtype=np.float64) for p in boundary]
+        h_span = (np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2.0
+        v_span = (np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2.0
+        landscape_in_photo = h_span < v_span   # paper taller than wide -> portrait orientation
+
+        if landscape_in_photo:
+            # Paper is upright in the photo -> output straight portrait
+            dst = np.array([
+                [0,   0  ],   # TL -> top-left of canvas
+                [W,   0  ],   # TR -> top-right
+                [W,   H  ],   # BR -> bottom-right
+                [0,   H  ],   # BL -> bottom-left
+            ], dtype=np.float32)
+            out_size = (int(W), int(H))
+        else:
+            # Paper is on its side in the photo -> rotate output 90 CW
+            # so the long axis of the document becomes the vertical of the output
+            dst = np.array([
+                [H,   0  ],   # TL -> top-right of rotated canvas
+                [H,   W  ],   # TR -> bottom-right
+                [0,   W  ],   # BR -> bottom-left
+                [0,   0  ],   # BL -> top-left
+            ], dtype=np.float32)
+            out_size = (int(H), int(W))
+
+        H_mat, _ = cv2.findHomography(src, dst, 0)
+        if H_mat is None:
             return None
-        points = np.array([doc_points], dtype=np.float32)
-        transformed = cv2.perspectiveTransform(points, homography_matrix)
-        return [(float(x), float(y)) for x, y in transformed[0]]
+
+        warped = cv2.warpPerspective(image, H_mat, out_size,
+                                     flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_CONSTANT,
+                                     borderValue=(255, 255, 255))
+
+        # Always return portrait (DOC_WIDTH x DOC_HEIGHT)
+        if warped.shape[1] > warped.shape[0]:   # still landscape
+            warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+
+        return warped
 
     # ------------------------------------------------------------------
-    # Document extraction (dewarping)
+    # extract_full_document (public API, wraps dewarp_document)
     # ------------------------------------------------------------------
 
     @staticmethod
     def extract_full_document(
         image: Image.Image,
         scan_result: Dict,
+        all_corners_img: Optional[Dict[str, Tuple[float, float]]] = None,
         vis_image: Optional[np.ndarray] = None,
     ) -> Optional[Image.Image]:
         """
-        Extract and dewarp the entire document from a captured photo.
-
-        Returns a corrected PIL Image with dimensions DOC_WIDTH x DOC_HEIGHT,
-        or None if dewarping is not possible.
+        Extract and perspective-correct the document from a captured photo.
 
         Args:
-            image:       PIL RGB image of the raw captured photo.
-            scan_result: Result dict from ExamScanner.scan_page().
-            vis_image:   Optional BGR visualisation image for fallback.
+            image:           PIL RGB image of the raw captured photo.
+            scan_result:     Result dict from ExamScanner.scan_page().
+            all_corners_img: Dict with all 4 corner names -> (x, y) in image
+                             space (real + estimated). If None, will be computed
+                             from scan_result markers.
+            vis_image:       Unused (kept for API compatibility).
+
+        Returns:
+            PIL Image, size DOC_WIDTH x DOC_HEIGHT, portrait orientation.
+            None on failure.
         """
         if not scan_result.get("success", False):
             return None
-        if scan_result.get("markers_found", 0) < 2 and vis_image is None:
+        if scan_result.get("markers_found", 0) < 2:
             return None
-        homography_matrix = CoordinateMapper.compute_homography_from_scan(
-            scan_result, vis_image=vis_image
-        )
+
+        # Build all_corners_img from scan_result if not provided
+        if all_corners_img is None:
+            original_positions = CoordinateMapper.calculate_original_marker_positions()
+            detected_img: Dict[str, Tuple[float, float]] = {}
+            for i, marker_info in enumerate(scan_result["detected_markers"]):
+                cn = marker_info.get("corner")
+                if cn not in original_positions:
+                    continue
+                detected_img[cn] = CoordinateMapper.calculate_marker_center(
+                    scan_result["corners"][i][0]
+                )
+            n = len(detected_img)
+            if n < 2:
+                return None
+            if n >= 4:
+                all_corners_img = detected_img
+            elif n == 3:
+                mn, mp = CoordinateMapper.estimate_missing_corner_3_markers(detected_img)
+                all_corners_img = dict(detected_img)
+                all_corners_img[mn] = mp
+            else:
+                all_corners_img = CoordinateMapper.reconstruct_from_two_markers(detected_img)
+
+        image_bgr = np.array(image)
+        if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 3:
+            image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_RGB2BGR)
+
+        warped = CoordinateMapper.dewarp_document(image_bgr, all_corners_img)
+        if warped is None:
+            return None
+
+        # Ensure output is exactly DOC_WIDTH x DOC_HEIGHT
+        target_w = MarkerConfig.DOC_WIDTH
+        target_h = MarkerConfig.DOC_HEIGHT
+        if warped.shape[1] != target_w or warped.shape[0] != target_h:
+            warped = cv2.resize(warped, (target_w, target_h),
+                                interpolation=cv2.INTER_LINEAR)
+
+        return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+
+    # ------------------------------------------------------------------
+    # Blue-boundary fallback
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_homography_from_blue_boundary(
+        vis_image: np.ndarray,
+    ) -> Optional[np.ndarray]:
+        corners_img = extract_blue_boundary(vis_image)
+        if corners_img is None:
+            return None
+        W = float(MarkerConfig.DOC_WIDTH)
+        H = float(MarkerConfig.DOC_HEIGHT)
+        src = np.array([(0,0),(W,0),(W,H),(0,H)], dtype=np.float32)
+        dst = np.array(corners_img, dtype=np.float32)
+        H_mat, _ = cv2.findHomography(src, dst, 0)
+        return H_mat
+
+    # ------------------------------------------------------------------
+    # Coordinate mapping utilities (for overlay / zone mapping)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def map_point_to_image(
+        doc_x: float, doc_y: float, homography_matrix: np.ndarray
+    ) -> Optional[Tuple[float, float]]:
         if homography_matrix is None:
             return None
-        homography_inv = np.linalg.inv(homography_matrix)
-        image_array = np.array(image)
-        if len(image_array.shape) == 3 and image_array.shape[2] == 3:
-            image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-        extracted = cv2.warpPerspective(
-            image_array, homography_inv,
-            (MarkerConfig.DOC_WIDTH, MarkerConfig.DOC_HEIGHT),
+        t = cv2.perspectiveTransform(
+            np.array([[[doc_x, doc_y]]], dtype=np.float32), homography_matrix
         )
-        return Image.fromarray(cv2.cvtColor(extracted, cv2.COLOR_BGR2RGB))
+        return (float(t[0][0][0]), float(t[0][0][1]))
+
+    @staticmethod
+    def map_points_to_image(
+        doc_points: List[Tuple[float, float]], homography_matrix: np.ndarray
+    ) -> Optional[List[Tuple[float, float]]]:
+        if homography_matrix is None:
+            return None
+        t = cv2.perspectiveTransform(
+            np.array([doc_points], dtype=np.float32), homography_matrix
+        )
+        return [(float(x), float(y)) for x, y in t[0]]
 
     # ------------------------------------------------------------------
     # Diagnostics
@@ -660,12 +565,6 @@ class CoordinateMapper:
 
     @staticmethod
     def get_scale_factors(homography_matrix: np.ndarray) -> Optional[Dict[str, float]]:
-        """
-        Estimate approximate scale factors between document and image space.
-
-        Returns:
-            Dict with scale_x, scale_y, average_scale, or None.
-        """
         if homography_matrix is None:
             return None
         p1 = CoordinateMapper.map_point_to_image(0, 0, homography_matrix)
@@ -674,10 +573,6 @@ class CoordinateMapper:
         )
         if p1 is None or p2 is None:
             return None
-        scale_x = abs(p2[0] - p1[0]) / MarkerConfig.DOC_WIDTH
-        scale_y = abs(p2[1] - p1[1]) / MarkerConfig.DOC_HEIGHT
-        return {
-            "scale_x": scale_x,
-            "scale_y": scale_y,
-            "average_scale": (scale_x + scale_y) / 2,
-        }
+        sx = abs(p2[0]-p1[0]) / MarkerConfig.DOC_WIDTH
+        sy = abs(p2[1]-p1[1]) / MarkerConfig.DOC_HEIGHT
+        return {"scale_x": sx, "scale_y": sy, "average_scale": (sx+sy)/2}

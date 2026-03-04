@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from PIL import Image as PILImage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -45,20 +46,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    
+
     # Resolve paths
     image_path = Path(args.image)
     if not image_path.is_absolute():
         image_path = PROJECT_ROOT / image_path
-    
+
     if not image_path.exists():
         print(f"[FAIL] Image not found: {image_path}")
         return 1
-    
+
     output_dir = Path(args.output)
     if not output_dir.is_absolute():
         output_dir = PROJECT_ROOT / output_dir
-    
+
     print("=" * 72)
     print("GEMINI IMAGE SPLITTER TEST")
     print("=" * 72)
@@ -68,23 +69,49 @@ def main() -> int:
     print(f"Target keywords: {LayoutConfig.KEY_WORDS}")
     print(f"Excluded words : {LayoutConfig.EXCLUDED_KEYWORDS}")
     print()
-    
+
     # Validate config
     try:
         LayoutConfig.validate()
     except Exception as exc:
         print(f"[FAIL] Config validation failed: {exc}")
         return 1
-    
+
     # Initialize splitter
     try:
         splitter = GeminiImageSplitter()
     except Exception as exc:
         print(f"[FAIL] Failed to initialize splitter: {exc}")
         return 1
-    
+
+    # ----------------------------------------------------------------
+    # DEBUG: show raw Gemini keyword detections before splitting
+    # ----------------------------------------------------------------
+    print("-" * 72)
+    print("DEBUG: Raw Gemini keyword detection")
+    print("-" * 72)
+    try:
+        debug_image = PILImage.open(image_path).convert("RGB")
+        raw_matches = splitter._gemini_extract(debug_image, debug_image.height)
+
+        print(f"Gemini detected {len(raw_matches)} keyword(s):\n")
+        for i, m in enumerate(raw_matches, 1):
+            print(
+                f"  [{i:02d}] keyword='{m.keyword}'"
+                f"  est_y={m.y_position}"
+                f"  text='{m.text[:70]}'"
+            )
+    except Exception as exc:
+        print(f"[WARN] Debug extraction failed: {exc}")
+
+    print()
+
+    # ----------------------------------------------------------------
     # Split image
+    # ----------------------------------------------------------------
+    print("-" * 72)
     print("Splitting image by keywords...")
+    print("-" * 72)
     try:
         sections = splitter.split_image_by_keywords(
             image=image_path,
@@ -95,21 +122,23 @@ def main() -> int:
         import traceback
         traceback.print_exc()
         return 1
-    
+
     if not sections:
         print("[FAIL] No sections extracted")
         return 1
-    
-    print(f"\n[PASS] Extracted {len(sections)} section(s):")
+
+    print(f"\n[PASS] Extracted {len(sections)} section(s):\n")
     for section in sections:
         keyword_text = section.keyword_trigger or "NO_KEYWORD"
         height = section.y_end - section.y_start
         print(
-            f"  Section {section.section_index}: "
-            f"keyword='{keyword_text}' y={section.y_start}-{section.y_end} "
-            f"height={height}px size={section.image.size}"
+            f"  Section {section.section_index:02d}: "
+            f"keyword='{keyword_text}'"
+            f"  y={section.y_start}-{section.y_end}"
+            f"  height={height}px"
+            f"  size={section.image.size}"
         )
-    
+
     # Save sections
     print(f"\nSaving sections to {output_dir}...")
     try:
@@ -121,12 +150,18 @@ def main() -> int:
     except Exception as exc:
         print(f"[FAIL] Save failed: {exc}")
         return 1
-    
-    print(f"\n[PASS] Saved {len(saved_paths)} files:")
+
+    print(f"\n[PASS] Saved {len(saved_paths)} files:\n")
     for path in saved_paths:
         print(f"  {path}")
-    
-    print("\n" + "-" * 72)
+
+    print("\n" + "=" * 72)
+    print(f"SUMMARY")
+    print("=" * 72)
+    print(f"  Keywords detected by Gemini : {len(raw_matches)}")
+    print(f"  Sections created            : {len(sections)}")
+    print(f"  Output directory            : {output_dir}")
+    print("=" * 72)
     print("FINAL RESULT: PASS")
     return 0
 

@@ -1,21 +1,24 @@
 """
 gemini_image_splitter.py
 -----------------------
-Splits exam pages into sections using Gemini Vision API for keyword extraction.
+Splits exam pages into sections using Gemini Vision API + OpenCV.
 
 Workflow:
-1. Extract text with bounding boxes from image using Gemini
-2. Find target keywords (تعليمة, سند) in extracted text
-3. Determine section boundaries based on keyword Y-coordinates
-4. Split image vertically into sections
+1. Gemini identifies which keywords exist and their rough position hint
+2. OpenCV finds actual pixel Y-coordinates of text bands
+3. Keyword text bands are matched to real pixel positions
+4. Image is split at exact pixel boundaries
 """
 
 from __future__ import annotations
 
+import re
 import time
+import json
 import sys
+import unicodedata
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Optional, Union
 from dataclasses import dataclass
 
 import cv2
@@ -23,280 +26,230 @@ import numpy as np
 from PIL import Image
 import google.generativeai as genai
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from logger_manager import LoggerManager
 from Layout_module.layout_config import LayoutConfig
 
 
+# ---------------------------------------------------------------------------
+# Arabic normalization
+# ---------------------------------------------------------------------------
+
+_DIACRITICS = re.compile(
+    r'[\u0610-\u061A\u064B-\u065F\u0670'
+    r'\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]'
+)
+_TATWEEL = re.compile(r'\u0640')
+_ALEF    = re.compile(r'[\u0622\u0623\u0625\u0671\u0627]')
+_YA      = re.compile(r'\u0649')
+_AL      = re.compile(r'^ال')
+
+
+def _normalize(text: str) -> str:
+    text = _DIACRITICS.sub('', text)
+    text = _TATWEEL.sub('', text)
+    text = _ALEF.sub('ا', text)
+    text = _YA.sub('ي', text)
+    return unicodedata.normalize('NFC', text)
+
+
+def _root(kw: str) -> str:
+    return _AL.sub('', _normalize(kw))
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
 @dataclass
 class KeywordMatch:
-    """Detected keyword with position in image"""
-    keyword: str
-    text: str  # full text block containing keyword
-    y_position: int  # vertical position (top of bounding box)
-    confidence: float = 1.0
+    keyword: str        # original keyword from config e.g. "تعليمة"
+    text: str           # full line text containing it
+    y_position: int     # pixel Y (top of that text band)
 
 
 @dataclass
 class ImageSection:
-    """A section of the exam page"""
     section_index: int
-    keyword_trigger: Optional[str]  # keyword that started this section
+    keyword_trigger: Optional[str]
     y_start: int
     y_end: int
     image: Image.Image
 
 
-class GeminiImageSplitter:
-    """
-    Splits exam images into sections using Gemini Vision API.
-    
-    Each section starts with a keyword from KEY_WORDS (تعليمة, سند).
-    """
+# ---------------------------------------------------------------------------
+# OpenCV text-band detector
+# ---------------------------------------------------------------------------
 
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
+def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
+    """
+    Returns list of (y_start, y_end) for every horizontal text band
+    detected via morphological projection.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) \
+           if len(image.shape) == 3 else image.copy()
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    # Dilate horizontally to merge characters into full text lines
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 2))
+    dilated = cv2.dilate(binary, kernel, iterations=2)
+
+    h_proj = np.sum(dilated, axis=1)
+    threshold = image.shape[1] * 3
+
+    bands = []
+    in_band = False
+    band_start = 0
+
+    for y, val in enumerate(h_proj):
+        if not in_band and val > threshold:
+            in_band = True
+            band_start = y
+        elif in_band and val <= threshold:
+            in_band = False
+            if y - band_start >= min_height:
+                bands.append((band_start, y))
+
+    if in_band and (len(h_proj) - band_start) >= min_height:
+        bands.append((band_start, len(h_proj)))
+
+    return bands
+
+
+def anchor_to_nearest_band(
+    estimated_y: int,
+    bands: List[tuple],
+    search_radius: int = 200,
+) -> Optional[int]:
+    """
+    Returns y_start of the text band whose centre is closest to estimated_y,
+    or None if nothing found within search_radius.
+    """
+    best_dist = search_radius + 1
+    best_y = None
+
+    for y0, y1 in bands:
+        centre = (y0 + y1) // 2
+        dist = abs(centre - estimated_y)
+        if dist < best_dist:
+            best_dist = dist
+            best_y = y0
+
+    return best_y
+
+
+# ---------------------------------------------------------------------------
+# Main splitter
+# ---------------------------------------------------------------------------
+
+class GeminiImageSplitter:
+
+    _ZONES = {
+        "top":    (0.00, 0.15),
+        "upper":  (0.15, 0.38),
+        "middle": (0.38, 0.62),
+        "lower":  (0.62, 0.85),
+        "bottom": (0.85, 1.00),
+    }
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ):
         self.logger = LoggerManager.get_logger(__name__)
-        
-        self.api_key = api_key or LayoutConfig.GEMINI_API_KEY
+
+        self.api_key    = api_key    or LayoutConfig.GEMINI_API_KEY
         self.model_name = model_name or LayoutConfig.GEMINI_MODEL_NAME
-        
+
         if not self.api_key:
             raise ValueError("GEMINI_AI_API_KEY is required")
-        
+
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel(self.model_name)
-        
-        self.keywords = LayoutConfig.KEY_WORDS
+
+        self.keywords          = LayoutConfig.KEY_WORDS
         self.excluded_keywords = LayoutConfig.EXCLUDED_KEYWORDS
-        
+
+        self._kw_roots   = {kw: _root(kw) for kw in self.keywords}
+        self._excl_roots = [_root(e) for e in self.excluded_keywords]
+
         self.logger.info(
-            f"GeminiImageSplitter initialized with model={self.model_name}, "
-            f"keywords={self.keywords}"
+            f"GeminiImageSplitter ready | model={self.model_name} "
+            f"| keywords={self.keywords}"
         )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def split_image_by_keywords(
         self,
         image: Union[str, Path, Image.Image, np.ndarray],
         min_section_height: int = 100,
     ) -> List[ImageSection]:
-        """
-        Split image into sections, each starting with a keyword.
-        
-        Args:
-            image: Input image (PIL, numpy, or path)
-            min_section_height: Minimum height for a section (px)
-        
-        Returns:
-            List of ImageSection objects
-        """
-        pil_image = self._normalize_image(image)
+
+        pil_image = self._to_pil(image)
+        cv_image  = self._to_cv(pil_image)
         width, height = pil_image.size
-        
-        self.logger.info(f"Splitting image ({width}x{height}) by keywords")
-        
-        # Extract text with positions using Gemini
-        keyword_matches = self._extract_keywords_with_positions(pil_image)
-        
-        if not keyword_matches:
-            self.logger.warning("No keywords found - returning full image as single section")
-            return [
-                ImageSection(
-                    section_index=0,
-                    keyword_trigger=None,
-                    y_start=0,
-                    y_end=height,
-                    image=pil_image,
+
+        self.logger.info(f"Processing image {width}x{height}")
+
+        # Step 1 — Gemini: get keywords with rough vertical positions
+        raw_matches = self._gemini_extract(pil_image, height)
+
+        if not raw_matches:
+            self.logger.warning("No keywords found – returning full image")
+            return [ImageSection(0, None, 0, height, pil_image)]
+
+        # Step 2 — OpenCV: find all real text bands
+        bands = find_text_bands(cv_image)
+        self.logger.debug(f"OpenCV found {len(bands)} text bands")
+
+        # Step 3 — Anchor each match to the nearest real text band
+        anchored: List[KeywordMatch] = []
+        for m in raw_matches:
+            real_y = anchor_to_nearest_band(m.y_position, bands, search_radius=250)
+            if real_y is None:
+                self.logger.warning(
+                    f"Could not anchor '{m.keyword}' (est y={m.y_position}) – using estimate"
                 )
-            ]
-        
-        # Sort matches by vertical position
-        keyword_matches.sort(key=lambda m: m.y_position)
-        
-        self.logger.info(
-            f"Found {len(keyword_matches)} keyword matches: "
-            f"{[m.keyword for m in keyword_matches]}"
-        )
-        
-        # Determine section boundaries
-        sections: List[ImageSection] = []
-        
-        for i, match in enumerate(keyword_matches):
-            y_start = match.y_position
-            
-            # Find end of this section (start of next keyword or image bottom)
-            if i + 1 < len(keyword_matches):
-                y_end = keyword_matches[i + 1].y_position
-            else:
-                y_end = height
-            
-            section_height = y_end - y_start
-            
-            # Skip tiny sections
-            if section_height < min_section_height:
-                self.logger.debug(
-                    f"Skipping tiny section (height={section_height}px) at y={y_start}"
-                )
-                continue
-            
-            # Crop section from image
-            section_img = pil_image.crop((0, y_start, width, y_end))
-            
-            sections.append(
-                ImageSection(
-                    section_index=len(sections),
-                    keyword_trigger=match.keyword,
-                    y_start=y_start,
-                    y_end=y_end,
-                    image=section_img,
-                )
+                real_y = m.y_position
+            anchored.append(KeywordMatch(m.keyword, m.text, real_y))
+            self.logger.debug(
+                f"Anchored '{m.keyword}': est={m.y_position} → real={real_y}"
             )
-        
+
+        # Remove matches that landed on the same band
+        anchored = self._deduplicate(anchored, proximity=40)
+        anchored.sort(key=lambda m: m.y_position)
+
+        self.logger.info(
+            f"Final splits: {[(m.keyword, m.y_position) for m in anchored]}"
+        )
+
+        # Step 4 — Crop sections between consecutive keyword positions
+        sections: List[ImageSection] = []
+        for i, match in enumerate(anchored):
+            y_start = match.y_position
+            y_end   = anchored[i + 1].y_position if i + 1 < len(anchored) else height
+
+            if (y_end - y_start) < min_section_height:
+                self.logger.debug(f"Skipping tiny section at y={y_start}")
+                continue
+
+            sections.append(ImageSection(
+                section_index   = len(sections),
+                keyword_trigger = match.keyword,
+                y_start         = y_start,
+                y_end           = y_end,
+                image           = pil_image.crop((0, y_start, width, y_end)),
+            ))
+
         self.logger.info(f"Created {len(sections)} sections")
         return sections
-
-    def _extract_keywords_with_positions(
-        self, image: Image.Image
-    ) -> List[KeywordMatch]:
-        """
-        Extract keywords and their vertical positions using Gemini Vision.
-        
-        Gemini Flash 2.0 doesn't provide exact bounding boxes, so we use a
-        text-extraction approach:
-        1. Ask Gemini to extract all text from image
-        2. Parse the response to find keyword occurrences
-        3. Estimate Y-position based on text flow (top-to-bottom)
-        """
-        self.logger.debug("Extracting text from image with Gemini Vision")
-        
-        prompt = f"""
-Extract ALL text from this Arabic exam page, preserving the vertical order.
-For each text block you find, output it on a new line with a line number.
-
-Focus on finding these specific keywords:
-{', '.join(self.keywords)}
-
-Exclude any text containing:
-{', '.join(self.excluded_keywords)}
-
-Output format:
-Line 1: [first text block]
-Line 2: [second text block]
-...
-
-Be thorough - extract every piece of text you can see.
-"""
-
-        try:
-            response = self.model.generate_content([prompt, image])
-            time.sleep(0.5)  # Rate limiting
-            
-            if not response or not response.text:
-                self.logger.warning("Gemini returned empty response")
-                return []
-            
-            extracted_text = response.text
-            self.logger.debug(f"Gemini response:\n{extracted_text[:500]}...")
-            
-            return self._parse_keywords_from_text(extracted_text, image.height)
-        
-        except Exception as exc:
-            self.logger.error(f"Gemini API call failed: {exc}")
-            return []
-
-    def _parse_keywords_from_text(
-        self, extracted_text: str, image_height: int
-    ) -> List[KeywordMatch]:
-        """
-        Parse Gemini's text output to find keywords and estimate positions.
-        
-        Since we don't have exact bounding boxes, we estimate Y-position
-        based on line number in the extracted text (assuming top-to-bottom flow).
-        """
-        matches: List[KeywordMatch] = []
-        lines = extracted_text.strip().split('\n')
-        
-        for line_idx, line in enumerate(lines):
-            line_clean = line.strip()
-            if not line_clean:
-                continue
-            
-            # Check if this line contains any keyword
-            for keyword in self.keywords:
-                if keyword in line_clean:
-                    # Check for excluded keywords
-                    if any(excl in line_clean for excl in self.excluded_keywords):
-                        self.logger.debug(
-                            f"Excluded keyword found in line {line_idx}: {line_clean}"
-                        )
-                        continue
-                    
-                    # Estimate Y-position based on line number
-                    # Assume uniform text distribution across image height
-                    estimated_y = int((line_idx / max(len(lines), 1)) * image_height)
-                    
-                    matches.append(
-                        KeywordMatch(
-                            keyword=keyword,
-                            text=line_clean,
-                            y_position=estimated_y,
-                        )
-                    )
-                    self.logger.debug(
-                        f"Found '{keyword}' at line {line_idx} "
-                        f"(est. y={estimated_y}): {line_clean[:50]}"
-                    )
-        
-        # Remove duplicate positions (same keyword appearing multiple times close together)
-        matches = self._deduplicate_nearby_matches(matches, proximity_threshold=50)
-        
-        return matches
-
-    @staticmethod
-    def _deduplicate_nearby_matches(
-        matches: List[KeywordMatch], proximity_threshold: int = 50
-    ) -> List[KeywordMatch]:
-        """
-        Remove duplicate keyword matches that are too close vertically.
-        Keeps the first occurrence.
-        """
-        if not matches:
-            return []
-        
-        matches_sorted = sorted(matches, key=lambda m: m.y_position)
-        deduplicated = [matches_sorted[0]]
-        
-        for match in matches_sorted[1:]:
-            last_y = deduplicated[-1].y_position
-            if abs(match.y_position - last_y) > proximity_threshold:
-                deduplicated.append(match)
-        
-        return deduplicated
-
-    @staticmethod
-    def _normalize_image(
-        image: Union[str, Path, Image.Image, np.ndarray]
-    ) -> Image.Image:
-        """Convert various image formats to PIL RGB Image."""
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-        
-        if isinstance(image, (str, Path)):
-            path = Path(image)
-            if not path.exists():
-                raise FileNotFoundError(f"Image not found: {path}")
-            return Image.open(path).convert("RGB")
-        
-        if isinstance(image, np.ndarray):
-            # Assume BGR from OpenCV
-            if len(image.shape) == 3 and image.shape[2] == 3:
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            else:
-                image_rgb = image
-            return Image.fromarray(image_rgb).convert("RGB")
-        
-        raise TypeError(f"Unsupported image type: {type(image)}")
 
     def save_sections(
         self,
@@ -304,34 +257,209 @@ Be thorough - extract every piece of text you can see.
         output_dir: Union[str, Path],
         prefix: str = "section",
     ) -> List[Path]:
-        """
-        Save image sections to disk.
-        
-        Args:
-            sections: List of ImageSection objects
-            output_dir: Output directory path
-            prefix: Filename prefix
-        
-        Returns:
-            List of saved file paths
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        saved_paths: List[Path] = []
-        
-        for section in sections:
-            keyword_tag = section.keyword_trigger or "header"
-            filename = f"{prefix}_{section.section_index:02d}_{keyword_tag}.jpg"
-            file_path = output_path / filename
-            
-            section.image.save(file_path, "JPEG", quality=95)
-            saved_paths.append(file_path)
-            
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        saved: List[Path] = []
+
+        for sec in sections:
+            tag = sec.keyword_trigger or "header"
+            fp  = out / f"{prefix}_{sec.section_index:02d}_{tag}.jpg"
+            sec.image.save(fp, "JPEG", quality=95)
+            saved.append(fp)
+
+        self.logger.info(f"Saved {len(saved)} sections to {out}")
+        return saved
+
+    # ------------------------------------------------------------------
+    # Gemini extraction
+    # ------------------------------------------------------------------
+
+    def _gemini_extract(
+        self, image: Image.Image, image_height: int
+    ) -> List[KeywordMatch]:
+        prompt = self._build_prompt()
+        try:
+            response = self.model.generate_content([prompt, image])
+            time.sleep(0.4)
+            if not response or not response.text:
+                self.logger.warning("Gemini returned empty response")
+                return []
+            return self._parse_response(response.text, image_height)
+        except Exception as exc:
+            self.logger.error(f"Gemini API error: {exc}")
+            return []
+
+    def _build_prompt(self) -> str:
+        kw_list   = " | ".join(self.keywords)
+        excl_list = " | ".join(self.excluded_keywords)
+        return f"""
+You are analyzing an Arabic exam page image.
+
+TASK: Find EVERY occurrence of these section-header keywords (with or without diacritics):
+  {kw_list}
+
+Also detect them when prefixed with ال (e.g. السند, التعليمة).
+
+DO NOT flag these excluded words:
+  {excl_list}
+
+For EACH keyword occurrence output one JSON object in an array.
+Output valid JSON array ONLY — no markdown fences, no explanation.
+
+Example output:
+[
+  {{
+    "keyword": "سند",
+    "text": "السند 1: شارك شادي في رحلة...",
+    "position_hint": "top",
+    "vertical_order": 1
+  }},
+  {{
+    "keyword": "تعليمة",
+    "text": "تعليمة 1: أحسب مبلغ الأب.",
+    "position_hint": "upper",
+    "vertical_order": 2
+  }}
+]
+
+RULES:
+- keyword        : "تعليمة" or "سند" only (no diacritics)
+- text           : the exact line from the image containing the keyword
+- position_hint  : top | upper | middle | lower | bottom
+- vertical_order : 1 = topmost keyword found, 2 = next one down, etc.
+
+List ALL keyword occurrences. A page may have 10+ keywords — include every one.
+Output JSON array only.
+"""
+
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, raw: str, image_height: int) -> List[KeywordMatch]:
+        data = self._safe_json(raw)
+        if data is not None and isinstance(data, list):
+            return self._from_blocks(data, image_height)
+
+        self.logger.warning("JSON parse failed – falling back to line scan")
+        return self._from_lines(raw, image_height)
+
+    @staticmethod
+    def _safe_json(raw: str):
+        text = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.MULTILINE)
+        text = re.sub(r'\s*```\s*$', '', text, flags=re.MULTILINE).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r'\[.*\]', text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _from_blocks(self, blocks: list, image_height: int) -> List[KeywordMatch]:
+        total = max(len(blocks), 1)
+        matches: List[KeywordMatch] = []
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+
+            combined = block.get("text", "") + " " + block.get("keyword", "")
+            confirmed_kw = self._detect_keyword(combined)
+            if confirmed_kw is None:
+                continue
+
+            order = block.get("vertical_order", 1)
+            hint  = block.get("position_hint", "middle")
+            y     = self._estimate_y(order, total, hint, image_height)
+
+            matches.append(KeywordMatch(confirmed_kw, block.get("text", ""), y))
             self.logger.debug(
-                f"Saved section {section.section_index} "
-                f"(y={section.y_start}-{section.y_end}) to {file_path}"
+                f"Gemini block: '{confirmed_kw}' order={order} hint={hint} est_y={y}"
             )
-        
-        self.logger.info(f"Saved {len(saved_paths)} sections to {output_path}")
-        return saved_paths
+
+        return matches
+
+    def _from_lines(self, raw: str, image_height: int) -> List[KeywordMatch]:
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        total = max(len(lines), 1)
+        matches: List[KeywordMatch] = []
+
+        for idx, line in enumerate(lines):
+            kw = self._detect_keyword(line)
+            if kw is None:
+                continue
+            y = int((idx / total) * image_height)
+            matches.append(KeywordMatch(kw, line, y))
+
+        return matches
+
+    # ------------------------------------------------------------------
+    # Keyword detection
+    # ------------------------------------------------------------------
+
+    def _detect_keyword(self, text: str) -> Optional[str]:
+        norm = _normalize(text)
+        for excl in self._excl_roots:
+            if excl in norm:
+                return None
+        for kw, root in self._kw_roots.items():
+            if root in norm:
+                return kw
+        return None
+
+    # ------------------------------------------------------------------
+    # Y estimation (coarse — refined by OpenCV anchoring)
+    # ------------------------------------------------------------------
+
+    def _estimate_y(
+        self, order: int, total: int, hint: str, image_height: int
+    ) -> int:
+        z_min, z_max = self._ZONES.get(hint, (0.0, 1.0))
+        z_centre     = (z_min + z_max) / 2
+        order_frac   = (order - 1) / max(total - 1, 1)
+        blended      = 0.6 * z_centre + 0.4 * order_frac
+        clamped      = max(z_min, min(z_max, blended))
+        return int(clamped * image_height)
+
+    # ------------------------------------------------------------------
+    # Deduplication
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deduplicate(matches: List[KeywordMatch], proximity: int = 40) -> List[KeywordMatch]:
+        if not matches:
+            return []
+        matches = sorted(matches, key=lambda m: m.y_position)
+        out = [matches[0]]
+        for m in matches[1:]:
+            if abs(m.y_position - out[-1].y_position) > proximity:
+                out.append(m)
+        return out
+
+    # ------------------------------------------------------------------
+    # Image helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_pil(image: Union[str, Path, Image.Image, np.ndarray]) -> Image.Image:
+        if isinstance(image, Image.Image):
+            return image.convert("RGB")
+        if isinstance(image, (str, Path)):
+            p = Path(image)
+            if not p.exists():
+                raise FileNotFoundError(f"Not found: {p}")
+            return Image.open(p).convert("RGB")
+        if isinstance(image, np.ndarray):
+            arr = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) \
+                  if len(image.shape) == 3 and image.shape[2] == 3 else image
+            return Image.fromarray(arr).convert("RGB")
+        raise TypeError(f"Unsupported image type: {type(image)}")
+
+    @staticmethod
+    def _to_cv(pil_image: Image.Image) -> np.ndarray:
+        return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)

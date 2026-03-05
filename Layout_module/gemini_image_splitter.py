@@ -12,6 +12,7 @@ Workflow:
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import json
@@ -167,6 +168,8 @@ class GeminiImageSplitter:
         if not self.api_key:
             raise ValueError("GEMINI_AI_API_KEY is required")
 
+        # Set GOOGLE_API_KEY env var for Gemini SDK
+        os.environ['GOOGLE_API_KEY'] = self.api_key
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel(self.model_name)
 
@@ -174,6 +177,8 @@ class GeminiImageSplitter:
         self.excluded_keywords = LayoutConfig.EXCLUDED_KEYWORDS
 
         self._kw_roots   = {kw: _root(kw) for kw in self.keywords}
+        # FIX 3: use whole-word matching for exclusions to prevent "تسند"
+        # root "سند" from accidentally blocking the keyword "سند".
         self._excl_roots = [_root(e) for e in self.excluded_keywords]
 
         self.logger.info(
@@ -271,65 +276,94 @@ class GeminiImageSplitter:
         return saved
 
     # ------------------------------------------------------------------
-    # Gemini extraction
+    # Gemini extraction  (FIX 4: retry logic added)
     # ------------------------------------------------------------------
 
     def _gemini_extract(
-        self, image: Image.Image, image_height: int
+        self, image: Image.Image, image_height: int, retries: int = 3
     ) -> List[KeywordMatch]:
         prompt = self._build_prompt()
-        try:
-            response = self.model.generate_content([prompt, image])
-            time.sleep(0.4)
-            if not response or not response.text:
-                self.logger.warning("Gemini returned empty response")
-                return []
-            return self._parse_response(response.text, image_height)
-        except Exception as exc:
-            self.logger.error(f"Gemini API error: {exc}")
-            return []
+        last_exc = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                response = self.model.generate_content([prompt, image])
+                time.sleep(0.4)
+
+                if not response or not response.text:
+                    self.logger.warning(
+                        f"Gemini returned empty response (attempt {attempt}/{retries})"
+                    )
+                    time.sleep(1.0 * attempt)
+                    continue
+
+                self.logger.debug(f"Gemini raw response:\n{response.text[:500]}")
+                result = self._parse_response(response.text, image_height)
+
+                if result:
+                    return result
+
+                self.logger.warning(
+                    f"Parsed 0 matches from non-empty response (attempt {attempt}/{retries}). "
+                    f"Raw text: {response.text[:300]}"
+                )
+                time.sleep(1.0 * attempt)
+
+            except Exception as exc:
+                last_exc = exc
+                self.logger.error(f"Gemini API error (attempt {attempt}/{retries}): {exc}")
+                time.sleep(1.5 * attempt)
+
+        if last_exc:
+            self.logger.error(f"All {retries} Gemini attempts failed. Last error: {last_exc}")
+        return []
+
+    # ------------------------------------------------------------------
+    # FIX 1: Clearer, step-by-step prompt that avoids empty responses
+    # ------------------------------------------------------------------
 
     def _build_prompt(self) -> str:
         kw_list   = " | ".join(self.keywords)
-        excl_list = " | ".join(self.excluded_keywords)
+        excl_list = " | ".join(self.excluded_keywords) if self.excluded_keywords else "none"
         return f"""
-You are analyzing an Arabic exam page image.
+You are analyzing an Arabic exam page image. Your task is to find section-header keywords.
 
-TASK: Find EVERY occurrence of these section-header keywords (with or without diacritics):
+STEP 1 — Read the full image carefully, including all Arabic text.
+
+STEP 2 — Find EVERY line that contains any of these keywords (with OR without diacritics, with OR without ال prefix):
   {kw_list}
+  Examples: سند، السند، سند:، تعليمة، التعليمة، تعليمة:
 
-Also detect them when prefixed with ال (e.g. السند, التعليمة).
-
-DO NOT flag these excluded words:
+STEP 3 — Skip any line where the word is part of these excluded words:
   {excl_list}
 
-For EACH keyword occurrence output one JSON object in an array.
-Output valid JSON array ONLY — no markdown fences, no explanation.
+STEP 4 — For each found line, output a JSON object. Collect all of them in a JSON array.
 
-Example output:
+Use this exact format:
 [
   {{
     "keyword": "سند",
-    "text": "السند 1: شارك شادي في رحلة...",
+    "text": "السند 1: شارك شادي في رحلة مدرسية",
     "position_hint": "top",
     "vertical_order": 1
   }},
   {{
     "keyword": "تعليمة",
-    "text": "تعليمة 1: أحسب مبلغ الأب.",
+    "text": "تعليمة 1: أحسب مبلغ الأب",
     "position_hint": "upper",
     "vertical_order": 2
   }}
 ]
 
-RULES:
-- keyword        : "تعليمة" or "سند" only (no diacritics)
-- text           : the exact line from the image containing the keyword
-- position_hint  : top | upper | middle | lower | bottom
-- vertical_order : 1 = topmost keyword found, 2 = next one down, etc.
+Field rules:
+- keyword        : use exactly "تعليمة" or "سند" (no diacritics, no ال prefix)
+- text           : copy the full line exactly as it appears in the image
+- position_hint  : where on the page — top | upper | middle | lower | bottom
+- vertical_order : 1 for the topmost occurrence, 2 for the next, and so on
 
-List ALL keyword occurrences. A page may have 10+ keywords — include every one.
-Output JSON array only.
+IMPORTANT: If you find zero occurrences, return an empty array: []
+A single page may contain many occurrences — list every single one.
+Your entire response must be only the JSON array, nothing else.
 """
 
     # ------------------------------------------------------------------
@@ -346,18 +380,24 @@ Output JSON array only.
 
     @staticmethod
     def _safe_json(raw: str):
+        # Strip markdown fences if present
         text = re.sub(r'^```(?:json)?\s*', '', raw.strip(), flags=re.MULTILINE)
         text = re.sub(r'\s*```\s*$', '', text, flags=re.MULTILINE).strip()
+
+        # Try direct parse first
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
+
+        # FIX 2: re.DOTALL added so multi-line JSON arrays are captured
         m = re.search(r'\[.*\]', text, re.DOTALL)
         if m:
             try:
                 return json.loads(m.group())
             except json.JSONDecodeError:
                 pass
+
         return None
 
     def _from_blocks(self, blocks: list, image_height: int) -> List[KeywordMatch]:
@@ -399,17 +439,23 @@ Output JSON array only.
         return matches
 
     # ------------------------------------------------------------------
-    # Keyword detection
+    # FIX 3: Keyword detection — exclusion uses whole-word check
+    # so "تسند" root "سند" won't block keyword "سند"
     # ------------------------------------------------------------------
 
     def _detect_keyword(self, text: str) -> Optional[str]:
         norm = _normalize(text)
+
+        # Exclusion: only block if the excluded root appears as a standalone word
+        # (surrounded by spaces/start/end), not as a substring of another word.
         for excl in self._excl_roots:
-            if excl in norm:
+            if re.search(r'(?<!\S)' + re.escape(excl) + r'(?!\S)', norm):
                 return None
+
         for kw, root in self._kw_roots.items():
             if root in norm:
                 return kw
+
         return None
 
     # ------------------------------------------------------------------

@@ -4,10 +4,11 @@ openai_image_splitter.py
 Splits exam pages into sections using OpenAI Vision API + OpenCV.
 
 Workflow:
-1. OpenAI Vision identifies keywords and their rough position hints
-2. OpenCV finds actual pixel Y-coordinates of text bands
-3. Keyword text bands are matched to real pixel positions
-4. Image is split at exact pixel boundaries
+1. Tall image is sliced into overlapping vertical chunks
+2. OpenAI Vision processes each chunk independently to find keywords + y_percent
+3. Per-chunk y_percent values are converted to absolute pixel positions
+4. All matches are merged, deduplicated, and snapped to OpenCV text bands
+5. Image is split at exact pixel boundaries between consecutive keywords
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def _root(kw: str) -> str:
 class KeywordMatch:
     keyword: str      # original keyword e.g. "تعليمة"
     text: str         # full line text containing it
-    y_position: int   # pixel Y (top of that text band)
+    y_position: int   # absolute pixel Y in the full image
 
 
 @dataclass
@@ -84,29 +85,20 @@ class ImageSection:
 # ---------------------------------------------------------------------------
 
 def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
-    """
-    Returns list of (y_start, y_end) for every horizontal text band
-    detected via morphological projection.
-    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) \
            if len(image.shape) == 3 else image.copy()
 
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 2))
     dilated = cv2.dilate(binary, kernel, iterations=2)
 
     h_proj = np.sum(dilated, axis=1)
     threshold = image.shape[1] * 3
 
-    bands = []
-    in_band = False
-    band_start = 0
-
+    bands, in_band, band_start = [], False, 0
     for y, val in enumerate(h_proj):
         if not in_band and val > threshold:
-            in_band = True
-            band_start = y
+            in_band, band_start = True, y
         elif in_band and val <= threshold:
             in_band = False
             if y - band_start >= min_height:
@@ -121,22 +113,13 @@ def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
 def anchor_to_nearest_band(
     estimated_y: int,
     bands: List[tuple],
-    search_radius: int = 200,
+    search_radius: int = 300,
 ) -> Optional[int]:
-    """
-    Returns y_start of the text band whose centre is closest to estimated_y,
-    or None if nothing found within search_radius.
-    """
-    best_dist = search_radius + 1
-    best_y = None
-
+    best_dist, best_y = search_radius + 1, None
     for y0, y1 in bands:
-        centre = (y0 + y1) // 2
-        dist = abs(centre - estimated_y)
+        dist = abs((y0 + y1) // 2 - estimated_y)
         if dist < best_dist:
-            best_dist = dist
-            best_y = y0
-
+            best_dist, best_y = dist, y0
     return best_y
 
 
@@ -146,13 +129,9 @@ def anchor_to_nearest_band(
 
 class OpenAIImageSplitter:
 
-    _ZONES = {
-        "top":    (0.00, 0.15),
-        "upper":  (0.15, 0.38),
-        "middle": (0.38, 0.62),
-        "lower":  (0.62, 0.85),
-        "bottom": (0.85, 1.00),
-    }
+    # Chunk settings — tune if needed
+    CHUNK_HEIGHT  = 1500   # px per chunk sent to OpenAI
+    CHUNK_OVERLAP = 200    # px overlap between consecutive chunks
 
     def __init__(
         self,
@@ -177,7 +156,8 @@ class OpenAIImageSplitter:
 
         self.logger.info(
             f"OpenAIImageSplitter ready | model={self.model_name} "
-            f"| keywords={self.keywords}"
+            f"| keywords={self.keywords} "
+            f"| chunk_height={self.CHUNK_HEIGHT}px overlap={self.CHUNK_OVERLAP}px"
         )
 
     # ------------------------------------------------------------------
@@ -196,21 +176,21 @@ class OpenAIImageSplitter:
 
         self.logger.info(f"Processing image {width}x{height}")
 
-        # Step 1 — OpenAI Vision: get keywords with rough vertical positions
-        raw_matches = self._openai_extract(pil_image, height)
+        # Step 1 — slice into chunks, run OpenAI on each
+        raw_matches = self._extract_all_chunks(pil_image, height)
 
         if not raw_matches:
             self.logger.warning("No keywords found – returning full image")
             return [ImageSection(0, None, 0, height, pil_image)]
 
-        # Step 2 — OpenCV: find all real text bands
+        # Step 2 — OpenCV bands
         bands = find_text_bands(cv_image)
         self.logger.debug(f"OpenCV found {len(bands)} text bands")
 
-        # Step 3 — Anchor each match to the nearest real text band
+        # Step 3 — Snap to nearest band
         anchored: List[KeywordMatch] = []
         for m in raw_matches:
-            real_y = anchor_to_nearest_band(m.y_position, bands, search_radius=250)
+            real_y = anchor_to_nearest_band(m.y_position, bands, search_radius=300)
             if real_y is None:
                 self.logger.warning(
                     f"Could not anchor '{m.keyword}' (est y={m.y_position}) – using estimate"
@@ -221,22 +201,26 @@ class OpenAIImageSplitter:
                 f"Anchored '{m.keyword}': est={m.y_position} → real={real_y}"
             )
 
-        # Remove matches that landed on the same band
-        anchored = self._deduplicate(anchored, proximity=40)
+        # Step 4 — Deduplicate and sort
+        anchored = self._deduplicate(anchored, proximity=60)
         anchored.sort(key=lambda m: m.y_position)
 
         self.logger.info(
-            f"Final splits: {[(m.keyword, m.y_position) for m in anchored]}"
+            f"Final splits ({len(anchored)}): "
+            f"{[(m.keyword, m.y_position) for m in anchored]}"
         )
 
-        # Step 4 — Crop sections between consecutive keyword positions
+        # Step 5 — Crop sections
         sections: List[ImageSection] = []
         for i, match in enumerate(anchored):
             y_start = match.y_position
             y_end   = anchored[i + 1].y_position if i + 1 < len(anchored) else height
 
             if (y_end - y_start) < min_section_height:
-                self.logger.debug(f"Skipping tiny section at y={y_start}")
+                self.logger.debug(
+                    f"Skipping tiny section '{match.keyword}' at y={y_start} "
+                    f"(height={y_end - y_start}px)"
+                )
                 continue
 
             sections.append(ImageSection(
@@ -259,25 +243,67 @@ class OpenAIImageSplitter:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         saved: List[Path] = []
-
         for sec in sections:
             tag = sec.keyword_trigger or "header"
             fp  = out / f"{prefix}_{sec.section_index:02d}_{tag}.jpg"
             sec.image.save(fp, "JPEG", quality=95)
             saved.append(fp)
-
         self.logger.info(f"Saved {len(saved)} sections to {out}")
         return saved
 
     # ------------------------------------------------------------------
-    # OpenAI Vision extraction
+    # Chunked extraction
+    # ------------------------------------------------------------------
+
+    def _extract_all_chunks(
+        self, pil_image: Image.Image, total_height: int
+    ) -> List[KeywordMatch]:
+        """Slice the image into overlapping chunks, run OpenAI on each,
+        convert chunk-local y_percent → absolute pixel Y."""
+
+        width = pil_image.width
+        all_matches: List[KeywordMatch] = []
+        chunk_idx = 0
+        y_top = 0
+
+        while y_top < total_height:
+            y_bot = min(y_top + self.CHUNK_HEIGHT, total_height)
+            chunk = pil_image.crop((0, y_top, width, y_bot))
+            chunk_h = y_bot - y_top
+
+            self.logger.info(
+                f"Chunk {chunk_idx}: y={y_top}-{y_bot} ({chunk_h}px)"
+            )
+
+            matches = self._openai_extract(chunk, chunk_h)
+
+            for m in matches:
+                abs_y = y_top + m.y_position
+                all_matches.append(KeywordMatch(m.keyword, m.text, abs_y))
+                self.logger.debug(
+                    f"  Chunk {chunk_idx}: '{m.keyword}' local_y={m.y_position} "
+                    f"→ abs_y={abs_y}  text='{m.text[:60]}'"
+                )
+
+            if y_bot >= total_height:
+                break
+            y_top = y_bot - self.CHUNK_OVERLAP
+            chunk_idx += 1
+
+        self.logger.info(
+            f"Total raw matches from {chunk_idx + 1} chunk(s): {len(all_matches)}"
+        )
+        return all_matches
+
+    # ------------------------------------------------------------------
+    # OpenAI Vision extraction (single chunk)
     # ------------------------------------------------------------------
 
     def _openai_extract(
         self, image: Image.Image, image_height: int
     ) -> List[KeywordMatch]:
 
-        b64 = self._pil_to_base64(image)
+        b64    = self._pil_to_base64(image)
         prompt = self._build_prompt()
 
         try:
@@ -294,10 +320,7 @@ class OpenAIImageSplitter:
                                     "detail": "high",
                                 },
                             },
-                            {
-                                "type": "text",
-                                "text": prompt,
-                            },
+                            {"type": "text", "text": prompt},
                         ],
                     }
                 ],
@@ -306,65 +329,71 @@ class OpenAIImageSplitter:
             )
 
             raw = response.choices[0].message.content
-            self.logger.debug(f"OpenAI raw response:\n{raw[:800]}")
+            self.logger.debug(f"OpenAI raw:\n{raw[:500]}")
             return self._parse_response(raw, image_height)
 
         except Exception as exc:
             self.logger.error(f"OpenAI API error: {exc}")
             return []
 
+    # ------------------------------------------------------------------
+    # Prompt
+    # ------------------------------------------------------------------
+
     def _build_prompt(self) -> str:
         kw_list   = " | ".join(self.keywords)
-        excl_list = " | ".join(self.excluded_keywords)
+        excl_list = " | ".join(self.excluded_keywords) if self.excluded_keywords else "none"
         return f"""
-You are analyzing an Arabic exam page image.
+You are analyzing a portion of an Arabic exam page image.
 
-TASK: Find EVERY occurrence of these section-header keywords (with or without diacritics):
+STEP 1 — Read every line of text in this image carefully.
+
+STEP 2 — Find EVERY line that contains any of these keywords
+(with OR without diacritics, with OR without the prefix ال):
   {kw_list}
+  Examples: سند، السند، سند:، تعليمة، التعليمة، تعليمة:
 
-Also detect them when prefixed with ال (e.g. السند, التعليمة).
-
-DO NOT flag these excluded words:
+STEP 3 — Skip lines where the word is solely part of these excluded words:
   {excl_list}
 
-For EACH keyword occurrence output one JSON object in an array.
-Output valid JSON array ONLY — no markdown fences, no explanation.
+STEP 4 — For each match, estimate y_percent: how far down THIS image the line
+appears, as a float from 0.0 (top of this image) to 1.0 (bottom of this image).
 
-Example output:
+STEP 5 — Output a JSON array sorted top to bottom. If no keywords found, return [].
+
+Format:
 [
   {{
     "keyword": "سند",
-    "text": "السند 1: شارك شادي في رحلة...",
-    "position_hint": "top",
+    "text": "السند 1: شارك شادي في رحلة مدرسية",
+    "y_percent": 0.08,
     "vertical_order": 1
   }},
   {{
     "keyword": "تعليمة",
-    "text": "تعليمة 1: أحسب مبلغ الأب.",
-    "position_hint": "upper",
+    "text": "تعليمة 1: أحسب مبلغ الأب",
+    "y_percent": 0.45,
     "vertical_order": 2
   }}
 ]
 
-RULES:
-- keyword        : "تعليمة" or "سند" only (no diacritics)
-- text           : the exact line from the image containing the keyword
-- position_hint  : top | upper | middle | lower | bottom
-- vertical_order : 1 = topmost keyword found, 2 = next one down, etc.
+Rules:
+- keyword   : exactly "تعليمة" or "سند" (no diacritics, no ال)
+- text      : exact line as seen in the image
+- y_percent : 0.0–1.0 relative to THIS image only
+- vertical_order : 1 = topmost in this image
 
-List ALL keyword occurrences. A page may have 10+ keywords — include every one.
-Output JSON array only.
+Your entire response must be only the JSON array, nothing else.
 """
 
     # ------------------------------------------------------------------
-    # Response parsing
+    # Parsing
     # ------------------------------------------------------------------
 
     def _parse_response(self, raw: str, image_height: int) -> List[KeywordMatch]:
         data = self._safe_json(raw)
         if data is not None and isinstance(data, list):
             return self._from_blocks(data, image_height)
-
         self.logger.warning("JSON parse failed – falling back to line scan")
         return self._from_lines(raw, image_height)
 
@@ -385,51 +414,39 @@ Output JSON array only.
         return None
 
     def _from_blocks(self, blocks: list, image_height: int) -> List[KeywordMatch]:
-        total = max(len(blocks), 1)
         matches: List[KeywordMatch] = []
-
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-
             combined = block.get("text", "") + " " + block.get("keyword", "")
             confirmed_kw = self._detect_keyword(combined)
             if confirmed_kw is None:
                 continue
-
-            order = block.get("vertical_order", 1)
-            hint  = block.get("position_hint", "middle")
-            y     = self._estimate_y(order, total, hint, image_height)
-
-            matches.append(KeywordMatch(confirmed_kw, block.get("text", ""), y))
-            self.logger.debug(
-                f"OpenAI block: '{confirmed_kw}' order={order} hint={hint} est_y={y}"
-            )
-
+            y_pct = max(0.0, min(1.0, float(block.get("y_percent", 0.5))))
+            estimated_y = int(y_pct * image_height)
+            matches.append(KeywordMatch(confirmed_kw, block.get("text", ""), estimated_y))
         return matches
 
     def _from_lines(self, raw: str, image_height: int) -> List[KeywordMatch]:
         lines = [l.strip() for l in raw.splitlines() if l.strip()]
         total = max(len(lines), 1)
         matches: List[KeywordMatch] = []
-
         for idx, line in enumerate(lines):
             kw = self._detect_keyword(line)
             if kw is None:
                 continue
             y = int((idx / total) * image_height)
             matches.append(KeywordMatch(kw, line, y))
-
         return matches
 
     # ------------------------------------------------------------------
-    # Keyword detection
+    # Keyword detection — whole-word exclusion
     # ------------------------------------------------------------------
 
     def _detect_keyword(self, text: str) -> Optional[str]:
         norm = _normalize(text)
         for excl in self._excl_roots:
-            if excl in norm:
+            if re.search(r'(?<!\S)' + re.escape(excl) + r'(?!\S)', norm):
                 return None
         for kw, root in self._kw_roots.items():
             if root in norm:
@@ -437,25 +454,11 @@ Output JSON array only.
         return None
 
     # ------------------------------------------------------------------
-    # Y estimation (coarse — refined by OpenCV anchoring)
-    # ------------------------------------------------------------------
-
-    def _estimate_y(
-        self, order: int, total: int, hint: str, image_height: int
-    ) -> int:
-        z_min, z_max = self._ZONES.get(hint, (0.0, 1.0))
-        z_centre     = (z_min + z_max) / 2
-        order_frac   = (order - 1) / max(total - 1, 1)
-        blended      = 0.6 * z_centre + 0.4 * order_frac
-        clamped      = max(z_min, min(z_max, blended))
-        return int(clamped * image_height)
-
-    # ------------------------------------------------------------------
     # Deduplication
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _deduplicate(matches: List[KeywordMatch], proximity: int = 40) -> List[KeywordMatch]:
+    def _deduplicate(matches: List[KeywordMatch], proximity: int = 60) -> List[KeywordMatch]:
         if not matches:
             return []
         matches = sorted(matches, key=lambda m: m.y_position)

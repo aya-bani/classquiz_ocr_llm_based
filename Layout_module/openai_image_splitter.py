@@ -202,7 +202,7 @@ class OpenAIImageSplitter:
             chunk_idx += 1
 
         # deduplicate and sort top→bottom by y_min
-        section_coords = self._deduplicate_coords(raw_coords, proximity=60)
+        section_coords = self._deduplicate_coords(raw_coords, proximity=self.CHUNK_OVERLAP)
         section_coords.sort(key=lambda c: c[1])
 
         self.logger.info(f"Detected {len(section_coords)} section lines")
@@ -220,7 +220,15 @@ class OpenAIImageSplitter:
     def split_image(self, image: Image.Image) -> List[Image.Image]:
         """
         Split *image* into sections based on keyword bounding boxes.
-        Cropping logic is identical to ImageSplitter.split_image().
+
+        Each section STARTS at its keyword's y_min and ENDS just before
+        the next keyword's y_min.  The last section runs to the bottom.
+        No header slice is created before the first keyword.
+
+        Example with 3 keywords at y=75, y=375, y=1570:
+            Section 0 : y=75   → y=375   (starts with keyword 1)
+            Section 1 : y=375  → y=1570  (starts with keyword 2)
+            Section 2 : y=1570 → bottom  (starts with keyword 3)
         """
         self.logger.info("Splitting image into sections")
 
@@ -233,31 +241,26 @@ class OpenAIImageSplitter:
         img_array     = np.array(image)
         height, width = img_array.shape[:2]
         sections      = []
-        y_start       = 0
 
         for i, coords in enumerate(line_coords):
             x_min, y_min, x_max, y_max = coords
 
-            if i == 0:
-                # slice from top to first keyword (header, may be empty)
-                crop = img_array[y_start:y_min, 0:width]
-                if crop.size != 0:
-                    sections.append(Image.fromarray(crop))
-                y_start = y_min
-            else:
-                # slice from previous keyword to this keyword
-                crop = img_array[y_start:y_min, 0:width]
-                if crop.size != 0:
-                    sections.append(Image.fromarray(crop))
-                y_start = y_min
+            # this section starts AT the current keyword
+            y_start = y_min
 
-        # last section: final keyword → bottom of image
-        crop = img_array[y_start:height, 0:width]
-        if crop.size != 0:
-            sections.append(Image.fromarray(crop))
-            self.logger.debug(
-                f"Created section {len(sections)} from y={y_start} to y={height}"
-            )
+            # this section ends just before the next keyword (or at image bottom)
+            if i + 1 < len(line_coords):
+                y_end = line_coords[i + 1][1]   # next keyword's y_min
+            else:
+                y_end = height                   # last section → bottom
+
+            crop = img_array[y_start:y_end, 0:width]
+            if crop.size != 0:
+                sections.append(Image.fromarray(crop))
+                self.logger.debug(
+                    f"Section {len(sections) - 1}: y={y_start}–{y_end} "
+                    f"({y_end - y_start}px)"
+                )
 
         self.logger.info(f"Total sections created: {len(sections)}")
         return sections

@@ -136,7 +136,7 @@ def anchor_to_nearest_band(
         dist = abs(centre - estimated_y)
         if dist < best_dist:
             best_dist = dist
-            best_y = y0
+            best_y = centre
 
     return best_y
 
@@ -206,8 +206,8 @@ class GeminiImageSplitter:
         raw_matches = self._gemini_extract(pil_image, height)
 
         if not raw_matches:
-            self.logger.warning("No keywords found – returning full image")
-            return [ImageSection(0, None, 0, height, pil_image)]
+            self.logger.warning("No keywords found – no sections created (strict keyword boundaries)")
+            return []
 
         # Step 2 — OpenCV: find all real text bands
         bands = find_text_bands(cv_image)
@@ -231,6 +231,10 @@ class GeminiImageSplitter:
         anchored = self._deduplicate(anchored, proximity=40)
         anchored.sort(key=lambda m: m.y_position)
 
+        if not anchored:
+            self.logger.warning("No anchored keyword positions – no sections created")
+            return []
+
         self.logger.info(
             f"Final splits: {[(m.keyword, m.y_position) for m in anchored]}"
         )
@@ -240,6 +244,9 @@ class GeminiImageSplitter:
         for i, match in enumerate(anchored):
             y_start = match.y_position
             y_end   = anchored[i + 1].y_position if i + 1 < len(anchored) else height
+
+            if y_end <= y_start:
+                continue
 
             if (y_end - y_start) < min_section_height:
                 self.logger.debug(f"Skipping tiny section at y={y_start}")

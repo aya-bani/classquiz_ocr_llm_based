@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-height",
         type=int,
-        default=100,
+        default=1,
         help="Minimum section height in pixels",
     )
     return parser.parse_args()
@@ -85,26 +85,22 @@ def main() -> int:
         print(f"[FAIL] Failed to initialize splitter: {exc}")
         return 1
 
-    # ----------------------------------------------------------------
-    # DEBUG: show raw OpenAI keyword detections before splitting
-    # ----------------------------------------------------------------
-    print("-" * 72)
-    print("DEBUG: Raw OpenAI keyword detection")
-    print("-" * 72)
-    raw_matches = []
-    try:
-        debug_image = PILImage.open(image_path).convert("RGB")
-        raw_matches = splitter._openai_extract(debug_image, debug_image.height)
+    image = PILImage.open(image_path).convert("RGB")
 
-        print(f"OpenAI detected {len(raw_matches)} keyword(s):\n")
-        for i, m in enumerate(raw_matches, 1):
-            print(
-                f"  [{i:02d}] keyword='{m.keyword}'"
-                f"  est_y={m.y_position}"
-                f"  text='{m.text[:70]}'"
-            )
+    # ----------------------------------------------------------------
+    # DEBUG: detect_section_lines — shows what OpenAI found per chunk
+    # ----------------------------------------------------------------
+    print("-" * 72)
+    print("DEBUG: detect_section_lines()")
+    print("-" * 72)
+    section_coords = []
+    try:
+        section_coords = splitter.detect_section_lines(image)
+        print(f"\nDetected {len(section_coords)} section line(s):\n")
+        for i, (x_min, y_min, x_max, y_max) in enumerate(section_coords, 1):
+            print(f"  [{i:02d}]  y_min={y_min:5d}  y_max={y_max:5d}  x=({x_min}–{x_max})")
     except Exception as exc:
-        print(f"[WARN] Debug extraction failed: {exc}")
+        print(f"[WARN] detect_section_lines failed: {exc}")
 
     print()
 
@@ -112,13 +108,10 @@ def main() -> int:
     # Split image
     # ----------------------------------------------------------------
     print("-" * 72)
-    print("Splitting image by keywords...")
+    print("Splitting image ...")
     print("-" * 72)
     try:
-        sections = splitter.split_image_by_keywords(
-            image=image_path,
-            min_section_height=args.min_height,
-        )
+        sections = splitter.split_image(image)
     except Exception as exc:
         print(f"[FAIL] Splitting failed: {exc}")
         import traceback
@@ -130,39 +123,34 @@ def main() -> int:
         return 1
 
     print(f"\n[PASS] Extracted {len(sections)} section(s):\n")
-    for section in sections:
-        keyword_text = section.keyword_trigger or "NO_KEYWORD"
-        height = section.y_end - section.y_start
-        print(
-            f"  Section {section.section_index:02d}: "
-            f"keyword='{keyword_text}'"
-            f"  y={section.y_start}-{section.y_end}"
-            f"  height={height}px"
-            f"  size={section.image.size}"
-        )
+    for i, section in enumerate(sections):
+        print(f"  Section {i:02d}:  size={section.size}")
 
+    # ----------------------------------------------------------------
     # Save sections
-    print(f"\nSaving sections to {output_dir}...")
+    # ----------------------------------------------------------------
+    print(f"\nSaving sections to {output_dir} ...")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
     try:
-        saved_paths = splitter.save_sections(
-            sections=sections,
-            output_dir=output_dir,
-            prefix="exam_section",
-        )
+        for i, section in enumerate(sections):
+            fp = output_dir / f"exam_section_{i:02d}.jpg"
+            section.save(fp, "JPEG", quality=95)
+            saved_paths.append(fp)
     except Exception as exc:
         print(f"[FAIL] Save failed: {exc}")
         return 1
 
-    print(f"\n[PASS] Saved {len(saved_paths)} files:\n")
+    print(f"\n[PASS] Saved {len(saved_paths)} file(s):\n")
     for path in saved_paths:
         print(f"  {path}")
 
     print("\n" + "=" * 72)
     print("SUMMARY")
     print("=" * 72)
-    print(f"  Keywords detected by OpenAI : {len(raw_matches)}")
-    print(f"  Sections created            : {len(sections)}")
-    print(f"  Output directory            : {output_dir}")
+    print(f"  Section lines detected : {len(section_coords)}")
+    print(f"  Sections created       : {len(sections)}")
+    print(f"  Output directory       : {output_dir}")
     print("=" * 72)
     print("FINAL RESULT: PASS")
     return 0

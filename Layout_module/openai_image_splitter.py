@@ -3,12 +3,16 @@ openai_image_splitter.py
 ------------------------
 Splits exam pages into sections using OpenAI Vision API + OpenCV.
 
-Workflow:
-1. Tall image is sliced into overlapping vertical chunks
-2. OpenAI Vision processes each chunk independently to find keywords + y_percent
-3. Per-chunk y_percent values are converted to absolute pixel positions
-4. All matches are merged, deduplicated, and snapped to OpenCV text bands
-5. Image is split at exact pixel boundaries between consecutive keywords
+Structure mirrors image_splitter.py (Google Vision version):
+  - detect_section_lines()  →  runs OpenAI Vision OCR (y_percent, proven working),
+                                snaps to OpenCV bands, returns sorted
+                                (x_min, y_min, x_max, y_max) list
+  - split_image()           →  identical cropping loop to ImageSplitter.split_image()
+  - split_and_save()        →  identical to ImageSplitter.split_and_save()
+
+Detection uses the original y_percent prompt (not pixel bounding boxes) because
+OpenAI Vision reliably estimates relative position but struggles with exact pixels.
+The y_percent is converted to absolute Y then snapped to the nearest OpenCV text band.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import sys
 import unicodedata
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 from dataclasses import dataclass
 
 import cv2
@@ -61,40 +65,17 @@ def _root(kw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-@dataclass
-class KeywordMatch:
-    keyword: str      # original keyword e.g. "تعليمة"
-    text: str         # full line text containing it
-    y_position: int   # absolute pixel Y in the full image
-
-
-@dataclass
-class ImageSection:
-    section_index: int
-    keyword_trigger: Optional[str]
-    y_start: int
-    y_end: int
-    image: Image.Image
-
-
-# ---------------------------------------------------------------------------
-# OpenCV text-band detector
+# OpenCV text-band helpers
 # ---------------------------------------------------------------------------
 
 def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) \
            if len(image.shape) == 3 else image.copy()
-
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 2))
     dilated = cv2.dilate(binary, kernel, iterations=2)
-
     h_proj = np.sum(dilated, axis=1)
     threshold = image.shape[1] * 3
-
     bands, in_band, band_start = [], False, 0
     for y, val in enumerate(h_proj):
         if not in_band and val > threshold:
@@ -103,10 +84,8 @@ def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
             in_band = False
             if y - band_start >= min_height:
                 bands.append((band_start, y))
-
     if in_band and (len(h_proj) - band_start) >= min_height:
         bands.append((band_start, len(h_proj)))
-
     return bands
 
 
@@ -129,9 +108,8 @@ def anchor_to_nearest_band(
 
 class OpenAIImageSplitter:
 
-    # Chunk settings — tune if needed
-    CHUNK_HEIGHT  = 1500   # px per chunk sent to OpenAI
-    CHUNK_OVERLAP = 200    # px overlap between consecutive chunks
+    CHUNK_HEIGHT  = 1500
+    CHUNK_OVERLAP = 200
 
     def __init__(
         self,
@@ -161,147 +139,171 @@ class OpenAIImageSplitter:
         )
 
     # ------------------------------------------------------------------
-    # Public API
+    # 1. detect_section_lines
+    #    Mirrors: ImageSplitter.detect_section_lines()
+    #    Returns: List of (x_min, y_min, x_max, y_max) sorted top→bottom
     # ------------------------------------------------------------------
 
-    def split_image_by_keywords(
-        self,
-        image: Union[str, Path, Image.Image, np.ndarray],
-        min_section_height: int = 100,
-    ) -> List[ImageSection]:
+    def detect_section_lines(
+        self, image: Image.Image
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Run OpenAI Vision OCR on *image* in overlapping chunks.
+        Each chunk uses the original y_percent prompt (proven reliable).
+        y_percent is converted to absolute Y then snapped to nearest OpenCV band.
+        Returns sorted [(x_min, y_min, x_max, y_max)] — same as Google Vision version.
+        """
+        self.logger.info("Running OpenAI OCR to detect section markers")
 
-        pil_image = self._to_pil(image)
-        cv_image  = self._to_cv(pil_image)
-        width, height = pil_image.size
+        cv_image      = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        bands         = find_text_bands(cv_image)
+        width, total_height = image.size
 
-        self.logger.info(f"Processing image {width}x{height}")
-
-        # Step 1 — slice into chunks, run OpenAI on each
-        raw_matches = self._extract_all_chunks(pil_image, height)
-
-        if not raw_matches:
-            self.logger.warning("No keywords found – returning full image")
-            return [ImageSection(0, None, 0, height, pil_image)]
-
-        # Step 2 — OpenCV bands
-        bands = find_text_bands(cv_image)
         self.logger.debug(f"OpenCV found {len(bands)} text bands")
 
-        # Step 3 — Snap to nearest band
-        anchored: List[KeywordMatch] = []
-        for m in raw_matches:
-            real_y = anchor_to_nearest_band(m.y_position, bands, search_radius=300)
-            if real_y is None:
-                self.logger.warning(
-                    f"Could not anchor '{m.keyword}' (est y={m.y_position}) – using estimate"
-                )
-                real_y = m.y_position
-            anchored.append(KeywordMatch(m.keyword, m.text, real_y))
-            self.logger.debug(
-                f"Anchored '{m.keyword}': est={m.y_position} → real={real_y}"
-            )
-
-        # Step 4 — Deduplicate and sort
-        anchored = self._deduplicate(anchored, proximity=60)
-        anchored.sort(key=lambda m: m.y_position)
-
-        self.logger.info(
-            f"Final splits ({len(anchored)}): "
-            f"{[(m.keyword, m.y_position) for m in anchored]}"
-        )
-
-        # Step 5 — Crop sections
-        sections: List[ImageSection] = []
-        for i, match in enumerate(anchored):
-            y_start = match.y_position
-            y_end   = anchored[i + 1].y_position if i + 1 < len(anchored) else height
-
-            if (y_end - y_start) < min_section_height:
-                self.logger.debug(
-                    f"Skipping tiny section '{match.keyword}' at y={y_start} "
-                    f"(height={y_end - y_start}px)"
-                )
-                continue
-
-            sections.append(ImageSection(
-                section_index   = len(sections),
-                keyword_trigger = match.keyword,
-                y_start         = y_start,
-                y_end           = y_end,
-                image           = pil_image.crop((0, y_start, width, y_end)),
-            ))
-
-        self.logger.info(f"Created {len(sections)} sections")
-        return sections
-
-    def save_sections(
-        self,
-        sections: List[ImageSection],
-        output_dir: Union[str, Path],
-        prefix: str = "section",
-    ) -> List[Path]:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        saved: List[Path] = []
-        for sec in sections:
-            tag = sec.keyword_trigger or "header"
-            fp  = out / f"{prefix}_{sec.section_index:02d}_{tag}.jpg"
-            sec.image.save(fp, "JPEG", quality=95)
-            saved.append(fp)
-        self.logger.info(f"Saved {len(saved)} sections to {out}")
-        return saved
-
-    # ------------------------------------------------------------------
-    # Chunked extraction
-    # ------------------------------------------------------------------
-
-    def _extract_all_chunks(
-        self, pil_image: Image.Image, total_height: int
-    ) -> List[KeywordMatch]:
-        """Slice the image into overlapping chunks, run OpenAI on each,
-        convert chunk-local y_percent → absolute pixel Y."""
-
-        width = pil_image.width
-        all_matches: List[KeywordMatch] = []
+        raw_coords: List[Tuple[int, int, int, int]] = []
         chunk_idx = 0
-        y_top = 0
+        y_top     = 0
 
         while y_top < total_height:
-            y_bot = min(y_top + self.CHUNK_HEIGHT, total_height)
-            chunk = pil_image.crop((0, y_top, width, y_bot))
+            y_bot   = min(y_top + self.CHUNK_HEIGHT, total_height)
+            chunk   = image.crop((0, y_top, width, y_bot))
             chunk_h = y_bot - y_top
 
-            self.logger.info(
-                f"Chunk {chunk_idx}: y={y_top}-{y_bot} ({chunk_h}px)"
-            )
+            self.logger.info(f"Chunk {chunk_idx}: y={y_top}–{y_bot} ({chunk_h}px)")
 
-            matches = self._openai_extract(chunk, chunk_h)
+            # original y_percent detection — returns (keyword, text, estimated_local_y)
+            chunk_matches = self._openai_extract(chunk, chunk_h)
 
-            for m in matches:
-                abs_y = y_top + m.y_position
-                all_matches.append(KeywordMatch(m.keyword, m.text, abs_y))
+            for keyword, word_text, local_y in chunk_matches:
+                abs_y = y_top + local_y
+
+                # snap to nearest OpenCV text band
+                snapped_y = anchor_to_nearest_band(abs_y, bands, search_radius=300)
+                if snapped_y is None:
+                    self.logger.warning(
+                        f"Could not snap '{keyword}' y={abs_y} – using raw value"
+                    )
+                    snapped_y = abs_y
+
+                # use full image width for x extent (we only care about y for splitting)
+                raw_coords.append((0, snapped_y, width, snapped_y + 30))
+
                 self.logger.debug(
-                    f"  Chunk {chunk_idx}: '{m.keyword}' local_y={m.y_position} "
-                    f"→ abs_y={abs_y}  text='{m.text[:60]}'"
+                    f"  Chunk {chunk_idx}: '{keyword}' "
+                    f"local_y={local_y} → abs_y={abs_y} → snapped={snapped_y}"
                 )
+                print("-----------------Word detected:-------------------")
+                print(f"  keyword='{keyword}'  text='{word_text}'  y={snapped_y}")
 
             if y_bot >= total_height:
                 break
-            y_top = y_bot - self.CHUNK_OVERLAP
+            y_top     = y_bot - self.CHUNK_OVERLAP
             chunk_idx += 1
 
-        self.logger.info(
-            f"Total raw matches from {chunk_idx + 1} chunk(s): {len(all_matches)}"
-        )
-        return all_matches
+        # deduplicate and sort top→bottom by y_min
+        section_coords = self._deduplicate_coords(raw_coords, proximity=60)
+        section_coords.sort(key=lambda c: c[1])
+
+        self.logger.info(f"Detected {len(section_coords)} section lines")
+        print("-----------------OCR Response-------------------")
+        for coord in section_coords:
+            print(f"  Section line bbox: {coord}")
+
+        return section_coords
 
     # ------------------------------------------------------------------
-    # OpenAI Vision extraction (single chunk)
+    # 2. split_image
+    #    Mirrors: ImageSplitter.split_image() — identical cropping loop
+    # ------------------------------------------------------------------
+
+    def split_image(self, image: Image.Image) -> List[Image.Image]:
+        """
+        Split *image* into sections based on keyword bounding boxes.
+        Cropping logic is identical to ImageSplitter.split_image().
+        """
+        self.logger.info("Splitting image into sections")
+
+        line_coords = self.detect_section_lines(image)
+
+        if not line_coords:
+            self.logger.warning("No section lines detected; returning full image")
+            return [image]
+
+        img_array     = np.array(image)
+        height, width = img_array.shape[:2]
+        sections      = []
+        y_start       = 0
+
+        for i, coords in enumerate(line_coords):
+            x_min, y_min, x_max, y_max = coords
+
+            if i == 0:
+                # slice from top to first keyword (header, may be empty)
+                crop = img_array[y_start:y_min, 0:width]
+                if crop.size != 0:
+                    sections.append(Image.fromarray(crop))
+                y_start = y_min
+            else:
+                # slice from previous keyword to this keyword
+                crop = img_array[y_start:y_min, 0:width]
+                if crop.size != 0:
+                    sections.append(Image.fromarray(crop))
+                y_start = y_min
+
+        # last section: final keyword → bottom of image
+        crop = img_array[y_start:height, 0:width]
+        if crop.size != 0:
+            sections.append(Image.fromarray(crop))
+            self.logger.debug(
+                f"Created section {len(sections)} from y={y_start} to y={height}"
+            )
+
+        self.logger.info(f"Total sections created: {len(sections)}")
+        return sections
+
+    # ------------------------------------------------------------------
+    # 3. split_and_save
+    #    Mirrors: ImageSplitter.split_and_save() — identical signature + return
+    # ------------------------------------------------------------------
+
+    def split_and_save(
+        self,
+        image: Image.Image,
+        exam_id: int,
+        submission_id: Optional[int] = None,
+    ) -> dict:
+        self.logger.info("Starting split_and_save")
+        sections = self.split_image(image)
+
+        if submission_id is not None:
+            output_prefix = f"exam_{exam_id}_submission_{submission_id}"
+            directory     = LayoutConfig.RAW_SUBMISSIONS_PATH / output_prefix
+        else:
+            output_prefix = f"exam_{exam_id}"
+            directory     = LayoutConfig.RAW_EXAMS_PATH / output_prefix
+
+        directory.mkdir(parents=True, exist_ok=True)
+
+        for i, section in enumerate(sections):
+            filepath = directory / f"{output_prefix}_section_{i}.jpg"
+            section.save(filepath, "JPEG")
+            self.logger.info(f"Saved section {i} to {filepath}")
+
+        self.logger.info("Finished split_and_save")
+        return {
+            'sections_dir':       directory,
+            'number_of_sections': len(sections),
+        }
+
+    # ------------------------------------------------------------------
+    # OpenAI Vision — single chunk (original y_percent prompt, unchanged)
+    # Returns: List of (keyword, text, estimated_local_y)
     # ------------------------------------------------------------------
 
     def _openai_extract(
         self, image: Image.Image, image_height: int
-    ) -> List[KeywordMatch]:
+    ) -> List[Tuple[str, str, int]]:
 
         b64    = self._pil_to_base64(image)
         prompt = self._build_prompt()
@@ -337,7 +339,7 @@ class OpenAIImageSplitter:
             return []
 
     # ------------------------------------------------------------------
-    # Prompt
+    # Prompt  (original, unchanged — y_percent is reliable)
     # ------------------------------------------------------------------
 
     def _build_prompt(self) -> str:
@@ -378,19 +380,22 @@ Format:
 ]
 
 Rules:
-- keyword   : exactly "تعليمة" or "سند" (no diacritics, no ال)
-- text      : exact line as seen in the image
-- y_percent : 0.0–1.0 relative to THIS image only
+- keyword        : exactly "تعليمة" or "سند" (no diacritics, no ال)
+- text           : exact line as seen in the image
+- y_percent      : 0.0–1.0 relative to THIS image only
 - vertical_order : 1 = topmost in this image
 
 Your entire response must be only the JSON array, nothing else.
 """
 
     # ------------------------------------------------------------------
-    # Parsing
+    # Parsing (original, unchanged)
     # ------------------------------------------------------------------
 
-    def _parse_response(self, raw: str, image_height: int) -> List[KeywordMatch]:
+    def _parse_response(
+        self, raw: str, image_height: int
+    ) -> List[Tuple[str, str, int]]:
+        """Returns list of (keyword, text, estimated_local_y)."""
         data = self._safe_json(raw)
         if data is not None and isinstance(data, list):
             return self._from_blocks(data, image_height)
@@ -413,34 +418,38 @@ Your entire response must be only the JSON array, nothing else.
                 pass
         return None
 
-    def _from_blocks(self, blocks: list, image_height: int) -> List[KeywordMatch]:
-        matches: List[KeywordMatch] = []
+    def _from_blocks(
+        self, blocks: list, image_height: int
+    ) -> List[Tuple[str, str, int]]:
+        results = []
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            combined = block.get("text", "") + " " + block.get("keyword", "")
+            combined     = block.get("text", "") + " " + block.get("keyword", "")
             confirmed_kw = self._detect_keyword(combined)
             if confirmed_kw is None:
                 continue
-            y_pct = max(0.0, min(1.0, float(block.get("y_percent", 0.5))))
-            estimated_y = int(y_pct * image_height)
-            matches.append(KeywordMatch(confirmed_kw, block.get("text", ""), estimated_y))
-        return matches
+            y_pct        = max(0.0, min(1.0, float(block.get("y_percent", 0.5))))
+            estimated_y  = int(y_pct * image_height)
+            results.append((confirmed_kw, block.get("text", ""), estimated_y))
+        return results
 
-    def _from_lines(self, raw: str, image_height: int) -> List[KeywordMatch]:
-        lines = [l.strip() for l in raw.splitlines() if l.strip()]
-        total = max(len(lines), 1)
-        matches: List[KeywordMatch] = []
+    def _from_lines(
+        self, raw: str, image_height: int
+    ) -> List[Tuple[str, str, int]]:
+        lines  = [l.strip() for l in raw.splitlines() if l.strip()]
+        total  = max(len(lines), 1)
+        results = []
         for idx, line in enumerate(lines):
             kw = self._detect_keyword(line)
             if kw is None:
                 continue
             y = int((idx / total) * image_height)
-            matches.append(KeywordMatch(kw, line, y))
-        return matches
+            results.append((kw, line, y))
+        return results
 
     # ------------------------------------------------------------------
-    # Keyword detection — whole-word exclusion
+    # Keyword detection (original, unchanged)
     # ------------------------------------------------------------------
 
     def _detect_keyword(self, text: str) -> Optional[str]:
@@ -454,42 +463,25 @@ Your entire response must be only the JSON array, nothing else.
         return None
 
     # ------------------------------------------------------------------
-    # Deduplication
+    # Deduplication — on (x_min, y_min, x_max, y_max) tuples
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _deduplicate(matches: List[KeywordMatch], proximity: int = 60) -> List[KeywordMatch]:
-        if not matches:
+    def _deduplicate_coords(
+        coords: List[Tuple[int, int, int, int]], proximity: int = 60
+    ) -> List[Tuple[int, int, int, int]]:
+        if not coords:
             return []
-        matches = sorted(matches, key=lambda m: m.y_position)
-        out = [matches[0]]
-        for m in matches[1:]:
-            if abs(m.y_position - out[-1].y_position) > proximity:
-                out.append(m)
+        coords = sorted(coords, key=lambda c: c[1])
+        out = [coords[0]]
+        for c in coords[1:]:
+            if abs(c[1] - out[-1][1]) > proximity:
+                out.append(c)
         return out
 
     # ------------------------------------------------------------------
     # Image helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _to_pil(image: Union[str, Path, Image.Image, np.ndarray]) -> Image.Image:
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-        if isinstance(image, (str, Path)):
-            p = Path(image)
-            if not p.exists():
-                raise FileNotFoundError(f"Not found: {p}")
-            return Image.open(p).convert("RGB")
-        if isinstance(image, np.ndarray):
-            arr = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) \
-                  if len(image.shape) == 3 and image.shape[2] == 3 else image
-            return Image.fromarray(arr).convert("RGB")
-        raise TypeError(f"Unsupported image type: {type(image)}")
-
-    @staticmethod
-    def _to_cv(pil_image: Image.Image) -> np.ndarray:
-        return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
     @staticmethod
     def _pil_to_base64(image: Image.Image) -> str:

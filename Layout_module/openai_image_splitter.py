@@ -24,7 +24,7 @@ import sys
 import unicodedata
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
 import cv2
@@ -75,7 +75,8 @@ def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 2))
     dilated = cv2.dilate(binary, kernel, iterations=2)
     h_proj = np.sum(dilated, axis=1)
-    threshold = image.shape[1] * 3
+    # More lenient threshold for better detection
+    threshold = image.shape[1] * 1.5
     bands, in_band, band_start = [], False, 0
     for y, val in enumerate(h_proj):
         if not in_band and val > threshold:
@@ -92,19 +93,32 @@ def find_text_bands(image: np.ndarray, min_height: int = 8) -> List[tuple]:
 def anchor_to_nearest_band(
     estimated_y: int,
     bands: List[tuple],
-    search_radius: int = 300,
-) -> Optional[int]:
-    best_dist, best_y = search_radius + 1, None
+    search_radius: int = 500,
+) -> Optional[Tuple[int, int]]:
+    """Find the nearest text band to estimated_y. Returns (y0, y1) or None."""
+    best_dist = search_radius + 1
+    best_band = None
     for y0, y1 in bands:
         dist = abs((y0 + y1) // 2 - estimated_y)
         if dist < best_dist:
-            best_dist, best_y = dist, y0
-    return best_y
+            best_dist = dist
+            best_band = (y0, y1)
+    return best_band
 
 
 # ---------------------------------------------------------------------------
 # Main splitter
 # ---------------------------------------------------------------------------
+
+@dataclass
+class KeywordDetection:
+    keyword: str
+    text: str
+    x_min: int
+    y_min: int
+    x_max: int
+    y_max: int
+
 
 class OpenAIImageSplitter:
 
@@ -131,6 +145,7 @@ class OpenAIImageSplitter:
 
         self._kw_roots   = {kw: _root(kw) for kw in self.keywords}
         self._excl_roots = [_root(e) for e in self.excluded_keywords]
+        self._last_detected_keywords: List[KeywordDetection] = []
 
         self.logger.info(
             f"OpenAIImageSplitter ready | model={self.model_name} "
@@ -159,9 +174,12 @@ class OpenAIImageSplitter:
         bands         = find_text_bands(cv_image)
         width, total_height = image.size
 
-        self.logger.debug(f"OpenCV found {len(bands)} text bands")
+        self.logger.info(f"OpenCV found {len(bands)} text bands in {total_height}px tall image")
+        if len(bands) < 20:
+            for i, (y0, y1) in enumerate(bands[:20]):
+                print(f"  Band {i:03d}: y={y0:5d}–{y1:5d} (height={y1-y0:4d}px)")
 
-        raw_coords: List[Tuple[int, int, int, int]] = []
+        raw_detections: List[KeywordDetection] = []
         chunk_idx = 0
         y_top     = 0
 
@@ -179,31 +197,52 @@ class OpenAIImageSplitter:
                 abs_y = y_top + local_y
 
                 # snap to nearest OpenCV text band
-                snapped_y = anchor_to_nearest_band(abs_y, bands, search_radius=300)
-                if snapped_y is None:
+                band = anchor_to_nearest_band(abs_y, bands, search_radius=500)
+                if band is None:
                     self.logger.warning(
                         f"Could not snap '{keyword}' y={abs_y} – using raw value"
                     )
-                    snapped_y = abs_y
+                    snapped_y_min = abs_y
+                    snapped_y_max = abs_y + 40  # default height
+                else:
+                    snapped_y_min, snapped_y_max = band
 
-                # use full image width for x extent (we only care about y for splitting)
-                raw_coords.append((0, snapped_y, width, snapped_y + 30))
+                # Keep full width for splitting. Annotation will place yellow highlight on RTL side.
+                raw_detections.append(
+                    KeywordDetection(
+                        keyword=keyword,
+                        text=word_text,
+                        x_min=0,
+                        y_min=snapped_y_min,
+                        x_max=width,
+                        y_max=snapped_y_max,
+                    )
+                )
 
                 self.logger.debug(
                     f"  Chunk {chunk_idx}: '{keyword}' "
-                    f"local_y={local_y} → abs_y={abs_y} → snapped={snapped_y}"
+                    f"local_y={local_y} → abs_y={abs_y} → snapped={snapped_y_min}–{snapped_y_max}"
                 )
                 print("-----------------Word detected:-------------------")
-                print(f"  keyword='{keyword}'  text='{word_text}'  y={snapped_y}")
+                print(f"  keyword='{keyword}'  text='{word_text}'  y={snapped_y_min}–{snapped_y_max}")
 
             if y_bot >= total_height:
                 break
             y_top     = y_bot - self.CHUNK_OVERLAP
             chunk_idx += 1
 
-        # deduplicate and sort top→bottom by y_min
-        section_coords = self._deduplicate_coords(raw_coords, proximity=self.CHUNK_OVERLAP)
+        # Deduplicate and sort top→bottom by y_min.
+        deduped_detections = self._deduplicate_detections(
+            raw_detections,
+            proximity=self.CHUNK_OVERLAP,
+        )
+
+        section_coords = [
+            (d.x_min, d.y_min, d.x_max, d.y_max)
+            for d in deduped_detections
+        ]
         section_coords.sort(key=lambda c: c[1])
+        self._last_detected_keywords = deduped_detections
 
         self.logger.info(f"Detected {len(section_coords)} section lines")
         print("-----------------OCR Response-------------------")
@@ -211,6 +250,60 @@ class OpenAIImageSplitter:
             print(f"  Section line bbox: {coord}")
 
         return section_coords
+
+    def get_last_detected_keywords(self) -> List[KeywordDetection]:
+        """Returns a shallow copy of the last keyword detections."""
+        return list(self._last_detected_keywords)
+
+    def create_debug_overlay(
+        self,
+        image: Image.Image,
+        section_coords: Optional[List[Tuple[int, int, int, int]]] = None,
+        detections: Optional[List[KeywordDetection]] = None,
+    ) -> Image.Image:
+        """
+        Build a debug image with:
+          1) semi-transparent yellow highlights for detected keywords (full-width),
+          2) red strike line at each section end.
+        """
+        if section_coords is None:
+            section_coords = self.detect_section_lines(image)
+
+        if detections is None:
+            detections = self.get_last_detected_keywords()
+
+        cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        height, width = cv_image.shape[:2]
+
+        # Create overlay layer for semi-transparent yellow highlights
+        overlay = cv_image.copy()
+        
+        # Draw full-width semi-transparent yellow rectangles for each keyword
+        for det in detections:
+            y0 = max(0, det.y_min - 3)
+            y1 = min(height - 1, det.y_max + 3)
+            # Full width yellow highlight
+            cv2.rectangle(
+                overlay,
+                (0, y0),
+                (width, y1),
+                (0, 255, 255),  # Yellow in BGR
+                thickness=-1,  # Filled
+            )
+            self.logger.info(f"Drew yellow highlight: y={y0}–{y1} for '{det.keyword}'")
+
+        # Blend the overlay with original image for transparency (40% overlay, 60% original)
+        cv2.addWeighted(overlay, 0.4, cv_image, 0.6, 0, cv_image)
+
+        # Draw red lines at section ends (on top of the blended image)
+        if section_coords:
+            for idx, (x_min, y_min, x_max, y_max) in enumerate(section_coords):
+                # Draw red line at y_max (bottom of each section)
+                cv2.line(cv_image, (0, y_max), (width, y_max), (0, 0, 255), 5)
+                self.logger.info(f"Drew red section line at y={y_max}")
+
+        overlay_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(overlay_rgb)
 
     # ------------------------------------------------------------------
     # 2. split_image
@@ -480,6 +573,20 @@ Your entire response must be only the JSON array, nothing else.
         for c in coords[1:]:
             if abs(c[1] - out[-1][1]) > proximity:
                 out.append(c)
+        return out
+
+    @staticmethod
+    def _deduplicate_detections(
+        detections: List[KeywordDetection],
+        proximity: int = 60,
+    ) -> List[KeywordDetection]:
+        if not detections:
+            return []
+        detections = sorted(detections, key=lambda d: d.y_min)
+        out = [detections[0]]
+        for det in detections[1:]:
+            if abs(det.y_min - out[-1].y_min) > proximity:
+                out.append(det)
         return out
 
     # ------------------------------------------------------------------

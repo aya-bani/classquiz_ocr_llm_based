@@ -71,6 +71,8 @@ def main() -> int:
     print(f"OpenAI model   : {LayoutConfig.OPENAI_MODEL_NAME}")
     print()
 
+    debug_overlay_path = None
+
     # Validate config
     try:
         LayoutConfig.validate()
@@ -101,6 +103,26 @@ def main() -> int:
             print(f"  [{i:02d}]  y_min={y_min:5d}  y_max={y_max:5d}  x=({x_min}–{x_max})")
     except Exception as exc:
         print(f"[WARN] detect_section_lines failed: {exc}")
+
+    print()
+
+    # ----------------------------------------------------------------
+    # Save overlay: yellow keyword highlights + red section end lines
+    # ----------------------------------------------------------------
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        overlay_image = splitter.create_debug_overlay(
+            image,
+            section_coords=section_coords,
+            detections=splitter.get_last_detected_keywords(),
+        )
+        debug_overlay_path = output_dir / "exam_overlay_debug.jpg"
+        overlay_image.save(debug_overlay_path, "JPEG", quality=95)
+        print(f"[PASS] Saved debug overlay: {debug_overlay_path}")
+        print("  - Yellow: detected Arabic keyword area (right side)")
+        print("  - Red   : end of each detected section")
+    except Exception as exc:
+        print(f"[WARN] Could not save debug overlay: {exc}")
 
     print()
 
@@ -150,6 +172,8 @@ def main() -> int:
     print("=" * 72)
     print(f"  Section lines detected : {len(section_coords)}")
     print(f"  Sections created       : {len(sections)}")
+    if debug_overlay_path is not None:
+        print(f"  Debug overlay          : {debug_overlay_path}")
     print(f"  Output directory       : {output_dir}")
     print("=" * 72)
     print("FINAL RESULT: PASS")

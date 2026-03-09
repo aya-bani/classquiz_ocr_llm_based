@@ -1,14 +1,17 @@
-import json
-import sys
-from agents_module.question_extractor import QuestionClassifier
-
-
-classifier = QuestionClassifier()
-
 from pathlib import Path
+import sys
 
-image_dir = Path("exam_20/exam_20_section_17.jpg")
+# Allow running this file directly: python agents_module\test.py
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+	sys.path.insert(0, str(PROJECT_ROOT))
+
+from agents_module.question_extractor import QuestionExtractor
+
+extractor = QuestionExtractor()
+
+image_dir = Path("data\Sections\test_output_openai\math1\exam_section_09.jpg")
 
 
-r = classifier.process_image(image_dir)
+r = extractor.process_image(image_dir, is_submission=False)
 print(r)

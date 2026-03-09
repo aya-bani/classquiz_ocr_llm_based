@@ -11,7 +11,6 @@ from .prompts import CLASSIFICATION_PROMPT
 from .agent import Agent
 
 
-
 class QuestionExtractor:
     """
     Classifies exam questions and extracts structured content using Google Gemini

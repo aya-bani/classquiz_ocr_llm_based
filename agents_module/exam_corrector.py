@@ -6,6 +6,7 @@ import json
 from .prompts import GRADING_PROMPT
 from .agent import Agent
 
+
 class ExamCorrector:
     """
     Grades student submissions by comparing with correct answers

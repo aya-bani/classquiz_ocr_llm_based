@@ -13,6 +13,7 @@ from .prompts import (
 # Load environment once at module level
 load_dotenv()
 
+
 class AgentsConfig:
     """Configuration for agents module with refined prompts"""
     

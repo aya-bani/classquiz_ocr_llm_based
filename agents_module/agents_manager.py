@@ -2,6 +2,7 @@ from .exam_corrector import ExamCorrector
 from .question_extractor import QuestionExtractor
 from .agents_config import AgentsConfig
 
+
 class AgentsManager:
     def __init__(self):
         AgentsConfig.validate()

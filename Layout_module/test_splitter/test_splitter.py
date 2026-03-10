@@ -19,7 +19,7 @@ def main():
     result = splitter.split_and_save(image, exam_id=1)
 
     # move the generated directory to the requested output location
-    dest_root = Path("Exams/google_vision") / "splited images into sections"
+    dest_root = Path("Exams/google_vision/prod") / "splited images into sections"
     dest_root.mkdir(parents=True, exist_ok=True)
 
     src_dir = Path(result["sections_dir"])

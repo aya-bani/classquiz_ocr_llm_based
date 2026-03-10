@@ -415,4 +415,3 @@ class QuestionExtractor:
             "question_type_distribution": type_counts,
             "most_common_type": (max(type_counts.items(), key=lambda x: x[1])[0] if type_counts else None)
         }
-    

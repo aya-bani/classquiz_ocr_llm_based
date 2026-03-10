@@ -138,7 +138,7 @@ class QuestionExtractorGoogleCloud:
         if self.executor:
             self.executor.shutdown(wait=True)
 
-    # ── public API ────────────────────────────────────────────────────────────
+    # ── public API ─────
 
     def process_exam(
         self,

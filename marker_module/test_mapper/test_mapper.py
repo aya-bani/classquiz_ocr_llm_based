@@ -25,7 +25,7 @@ def _stem(p: Path) -> str:
 
 
 def _resolve_input(project_root: Path) -> Path:
-    base = project_root / "Exams" / "new_real_exams"
+    base = project_root / "Exams" / "examen_corrige"
     if len(sys.argv) > 1:
         c = Path(sys.argv[1])
         return c if c.is_absolute() else base / c
@@ -38,7 +38,8 @@ def _mode(n: int) -> str:
     if n >= 4: return "4 markers (full)"
     if n == 3: return "3 markers (1 estimated)"
     if n == 2: return "2 markers (2 reconstructed)"
-    return f"INSUFFICIENT ({n})"
+    if n == 1: return "1 marker (3 reconstructed)"
+    return "0 markers (fallback detection)"
 
 
 def draw_corner(vis, center, name, color, estimated=False):
@@ -104,12 +105,12 @@ def main() -> int:
     # ---- Detect -------------------------------------------------------
     preprocessed = ExamScanner._preprocess_image(image)
     corners, ids = ExamScanner._detect_markers_with_fallback(image, preprocessed)
-    if ids is None or len(ids) == 0:
-        print("ERROR: no markers detected"); return 1
 
-    detected_markers, corners_list, exam_ids, page_numbers = (
-        ExamScanner._process_markers_with_corners(ids, corners)
-    )
+    detected_markers, corners_list, exam_ids, page_numbers = [], [], set(), set()
+    if ids is not None and len(ids) > 0:
+        detected_markers, corners_list, exam_ids, page_numbers = (
+            ExamScanner._process_markers_with_corners(ids, corners)
+        )
     print(f"Raw detections   : {len(detected_markers)} markers")
     print(f"Exam IDs         : {sorted(exam_ids) if exam_ids else 'N/A'}")
     print(f"Page numbers     : {sorted(page_numbers) if page_numbers else 'N/A'}")
@@ -118,7 +119,8 @@ def main() -> int:
     try:
         all_corners_img, estimated_names = CoordinateMapper.resolve_corners(
             detected_markers, corners_list,
-            image_w=img_w, image_h=img_h,   # <-- enables quadrant filter
+            image_w=img_w, image_h=img_h,
+            image_bgr=image,   # <-- enables fallback detection
         )
     except ValueError as e:
         print(f"ERROR: {e}"); return 1

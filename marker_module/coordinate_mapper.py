@@ -285,6 +285,89 @@ class CoordinateMapper:
                 all_corners[corner_name] = (float(estimated[0]), float(estimated[1]))
         return all_corners
 
+    @staticmethod
+    def reconstruct_from_one_marker(
+        detected: Dict[str, Tuple[float, float]],
+        image_w: int,
+        image_h: int,
+    ) -> Dict[str, Tuple[float, float]]:
+        """Estimate all 4 corners from a single detected marker.
+
+        Uses the known document aspect ratio and the marker's expected
+        position to compute a uniform scale + translation mapping from
+        document space to image space (no rotation assumed).
+        """
+        original_positions = CoordinateMapper.calculate_original_marker_positions()
+        name = list(detected.keys())[0]
+        P_img = np.array(detected[name], dtype=np.float64)
+        P_doc = np.array(original_positions[name]["center"], dtype=np.float64)
+
+        W = float(MarkerConfig.DOC_WIDTH)
+        H = float(MarkerConfig.DOC_HEIGHT)
+
+        # Estimate scale from image dimensions vs document dimensions
+        scale = min(image_w / W, image_h / H)
+
+        # Translation: P_img = scale * P_doc + offset
+        offset = P_img - scale * P_doc
+
+        all_corners: Dict[str, Tuple[float, float]] = {}
+        for corner_name in CORNER_ORDER:
+            doc_center = np.array(original_positions[corner_name]["center"], dtype=np.float64)
+            est = scale * doc_center + offset
+            all_corners[corner_name] = (float(est[0]), float(est[1]))
+        # Keep the original detected position
+        all_corners[name] = detected[name]
+        return all_corners
+
+    @staticmethod
+    def resolve_corners_from_blue_boundary(
+        image_bgr: np.ndarray,
+    ) -> Optional[Tuple[Dict[str, Tuple[float, float]], set]]:
+        """Fallback: detect 4 corners from blue boundary lines in the image."""
+        corners_img = extract_blue_boundary(image_bgr)
+        if corners_img is None:
+            return None
+        names = ["top_left", "top_right", "bottom_right", "bottom_left"]
+        all_corners = {n: (float(c[0]), float(c[1])) for n, c in zip(names, corners_img)}
+        estimated_names = set(names)  # all from boundary, none from markers
+        return all_corners, estimated_names
+
+    @staticmethod
+    def resolve_corners_from_contour(
+        image_bgr: np.ndarray,
+    ) -> Optional[Tuple[Dict[str, Tuple[float, float]], set]]:
+        """Last-resort fallback: detect paper edges via grayscale contour/Otsu."""
+        h, w = image_bgr.shape[:2]
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+
+        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        otsu = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=5)
+        contours, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < 0.15 * h * w:
+            return None
+
+        hull = cv2.convexHull(largest)
+        approx = cv2.approxPolyDP(hull, 0.03 * cv2.arcLength(hull, True), True)
+        if len(approx) != 4:
+            # Try with larger epsilon
+            approx = cv2.approxPolyDP(hull, 0.05 * cv2.arcLength(hull, True), True)
+        if len(approx) != 4:
+            return None
+
+        pts = approx.reshape(4, 2).astype(np.float64)
+        ordered = _bb_order_corners([tuple(p.tolist()) for p in pts])
+
+        names = ["top_left", "top_right", "bottom_right", "bottom_left"]
+        all_corners = {n: (float(c[0]), float(c[1])) for n, c in zip(names, ordered)}
+        return all_corners, set(names)
+
     # ------------------------------------------------------------------
     # Core: resolve + validate all 4 corner positions
     # ------------------------------------------------------------------
@@ -295,6 +378,7 @@ class CoordinateMapper:
         corners_data: List[np.ndarray],
         image_w: int = 0,
         image_h: int = 0,
+        image_bgr: Optional[np.ndarray] = None,
     ) -> Tuple[Dict[str, Tuple[float, float]], set]:
         """
         Collect detected marker centres, validate them with quadrant filtering,
@@ -304,25 +388,27 @@ class CoordinateMapper:
         -------------------
         Step 1 — Quadrant filter (primary defence):
             Each corner is only kept if it lies in the correct spatial quadrant
-            of the image. A marker labelled 'bottom_left' that appears in the
-            top half of the photo is rejected immediately, regardless of which
-            ArUco ID was decoded. This eliminates markers from other pages in
-            a stack, which are the most common source of false detections.
+            of the image.
 
         Step 2 — Convexity check (secondary defence):
             If all 4 survived step 1, verify they form a convex quad. If not,
-            try dropping each one and re-estimating; keep the set that produces
-            the most convex arrangement.
+            try dropping each one and re-estimating.
 
         Step 3 — Estimation:
-            Fill any remaining missing corners (3 known -> parallelogram rule,
-            2 known -> similarity transform).
+            4 markers -> use directly
+            3 markers -> parallelogram rule
+            2 markers -> similarity transform
+            1 marker  -> scale + translate from document layout
+
+        Step 4 — Fallbacks (if < 1 marker or image provided):
+            a) Blue boundary detection (HSV thresholding)
+            b) Contour-based paper detection (Otsu + convex hull)
 
         Args:
             detected_markers: List of marker dicts with 'corner' key.
             corners_data:     Parallel list of ArUco corner arrays.
             image_w / image_h: Image dimensions for quadrant filtering.
-                               If 0, quadrant filter is skipped.
+            image_bgr:         Original BGR image for fallback detection.
 
         Returns:
             (all_corners_img, estimated_names)
@@ -356,7 +442,6 @@ class CoordinateMapper:
                 mn, mp = _estimate_missing(candidate)
                 test = dict(candidate); test[mn] = mp
                 if _is_convex_quad(test):
-                    # Score: distance of dropped marker from its estimated position
                     score = np.linalg.norm(np.array(clean[drop]) - np.array(test[drop]))
                     if score < best_score:
                         best_score = score
@@ -366,10 +451,8 @@ class CoordinateMapper:
                 print(f"  Dropped outlier '{dropped}' (err={best_score:.1f}px)")
 
         n = len(clean)
-        if n < 2:
-            raise ValueError(f"Only {n} valid marker(s) after filtering — cannot proceed.")
 
-        # Step 3: estimate missing corners
+        # Step 3: estimate missing corners from markers
         estimated_names: set = set()
         all_corners_img: Dict[str, Tuple[float, float]] = {}
 
@@ -380,9 +463,33 @@ class CoordinateMapper:
             all_corners_img = dict(clean)
             all_corners_img[mn] = mp
             estimated_names.add(mn)
-        else:  # n == 2
+        elif n == 2:
             all_corners_img = CoordinateMapper.reconstruct_from_two_markers(clean)
             estimated_names = set(all_corners_img.keys()) - set(clean.keys())
+        elif n == 1 and image_w > 0 and image_h > 0:
+            print("  1 marker — estimating from document layout + image size")
+            all_corners_img = CoordinateMapper.reconstruct_from_one_marker(
+                clean, image_w, image_h
+            )
+            estimated_names = set(all_corners_img.keys()) - set(clean.keys())
+        else:
+            # Step 4: no usable markers — try image-based fallbacks
+            if image_bgr is not None:
+                print("  0 usable markers — trying blue boundary fallback...")
+                result = CoordinateMapper.resolve_corners_from_blue_boundary(image_bgr)
+                if result is not None:
+                    print("  Blue boundary detected successfully")
+                    return result
+
+                print("  Blue boundary failed — trying contour fallback...")
+                result = CoordinateMapper.resolve_corners_from_contour(image_bgr)
+                if result is not None:
+                    print("  Contour-based paper detection succeeded")
+                    return result
+
+            raise ValueError(
+                f"Only {n} valid marker(s) and no image fallback available — cannot proceed."
+            )
 
         return all_corners_img, estimated_names
 

@@ -39,7 +39,7 @@ from google.api_core import exceptions as gcp_exceptions
 from google.cloud import vision
 from openai import OpenAI, RateLimitError, APIError
 
-# ── project-root path fix ─────────────────────────────────────────────────────
+# ── project-root path fix 
 _PROJECT_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))

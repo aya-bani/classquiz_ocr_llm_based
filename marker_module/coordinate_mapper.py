@@ -221,6 +221,126 @@ def _is_convex_quad(pts: Dict[str, Tuple[float, float]]) -> bool:
     return len(set(cross_signs)) == 1
 
 
+def _marker_center_expected_ratio() -> float:
+    offset = MarkerConfig.MARGIN + MarkerConfig.MARKER_SIZE / 2.0
+    w = MarkerConfig.DOC_WIDTH - 2.0 * offset
+    h = MarkerConfig.DOC_HEIGHT - 2.0 * offset
+    return float(w / h)
+
+
+def _quad_angle_error(pts: Dict[str, Tuple[float, float]]) -> float:
+    tl = np.array(pts["top_left"], dtype=np.float64)
+    tr = np.array(pts["top_right"], dtype=np.float64)
+    br = np.array(pts["bottom_right"], dtype=np.float64)
+    bl = np.array(pts["bottom_left"], dtype=np.float64)
+
+    def corner_err(prev_pt, pt, next_pt):
+        v1 = prev_pt - pt
+        v2 = next_pt - pt
+        n1 = float(np.linalg.norm(v1))
+        n2 = float(np.linalg.norm(v2))
+        if n1 < 1e-6 or n2 < 1e-6:
+            return 1.0
+        cosang = float(np.dot(v1, v2) / (n1 * n2))
+        return abs(cosang)
+
+    errs = [
+        corner_err(bl, tl, tr),
+        corner_err(tl, tr, br),
+        corner_err(tr, br, bl),
+        corner_err(br, bl, tl),
+    ]
+    return float(np.mean(np.array(errs, dtype=np.float64)))
+
+
+def _quad_aspect_ratio(pts: Dict[str, Tuple[float, float]]) -> float:
+    tl = np.array(pts["top_left"], dtype=np.float64)
+    tr = np.array(pts["top_right"], dtype=np.float64)
+    br = np.array(pts["bottom_right"], dtype=np.float64)
+    bl = np.array(pts["bottom_left"], dtype=np.float64)
+    w = (float(np.linalg.norm(tr - tl)) + float(np.linalg.norm(br - bl))) / 2.0
+    h = (float(np.linalg.norm(bl - tl)) + float(np.linalg.norm(br - tr))) / 2.0
+    return float(w / max(h, 1e-6))
+
+
+def _quad_distance_scale_error(pts: Dict[str, Tuple[float, float]]) -> float:
+    tl = np.array(pts["top_left"], dtype=np.float64)
+    tr = np.array(pts["top_right"], dtype=np.float64)
+    br = np.array(pts["bottom_right"], dtype=np.float64)
+    bl = np.array(pts["bottom_left"], dtype=np.float64)
+
+    offset = MarkerConfig.MARGIN + MarkerConfig.MARKER_SIZE / 2.0
+    inter_w = MarkerConfig.DOC_WIDTH - 2.0 * offset
+    inter_h = MarkerConfig.DOC_HEIGHT - 2.0 * offset
+    if inter_w <= 1e-6 or inter_h <= 1e-6:
+        return 1.0
+
+    sx = ((float(np.linalg.norm(tr - tl)) + float(np.linalg.norm(br - bl))) / 2.0) / inter_w
+    sy = ((float(np.linalg.norm(bl - tl)) + float(np.linalg.norm(br - tr))) / 2.0) / inter_h
+    return abs(float(np.log((sx + 1e-6) / (sy + 1e-6))))
+
+
+def _geometry_error_score(pts: Dict[str, Tuple[float, float]]) -> float:
+    expected_ratio = _marker_center_expected_ratio()
+    aspect = _quad_aspect_ratio(pts)
+    aspect_err = abs(float(np.log((aspect + 1e-6) / (expected_ratio + 1e-6))))
+    angle_err = _quad_angle_error(pts)
+    dist_err = _quad_distance_scale_error(pts)
+    return dist_err + angle_err + aspect_err
+
+
+def _is_plausible_quad(
+    pts: Dict[str, Tuple[float, float]],
+    aspect_tol_log: float = 0.45,
+    max_angle_err: float = 0.55,
+    max_scale_err: float = 0.75,
+) -> bool:
+    if not _is_convex_quad(pts):
+        return False
+
+    expected_ratio = _marker_center_expected_ratio()
+    aspect = _quad_aspect_ratio(pts)
+    aspect_err = abs(float(np.log((aspect + 1e-6) / (expected_ratio + 1e-6))))
+    if aspect_err > aspect_tol_log:
+        return False
+
+    if _quad_angle_error(pts) > max_angle_err:
+        return False
+
+    if _quad_distance_scale_error(pts) > max_scale_err:
+        return False
+
+    return True
+
+
+def _refine_marker_center_subpixel(
+    marker_corners: np.ndarray,
+    gray: Optional[np.ndarray],
+) -> Tuple[float, float]:
+    pts = marker_corners.astype(np.float32).reshape(-1, 2)
+
+    if gray is not None and gray.size > 0:
+        sp = pts.reshape(-1, 1, 2).copy()
+        term = (
+            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+            40,
+            0.001,
+        )
+        cv2.cornerSubPix(gray, sp, (5, 5), (-1, -1), term)
+        pts = sp.reshape(-1, 2)
+
+    mean_center = np.mean(pts, axis=0)
+    moments = cv2.moments(pts.astype(np.float32))
+    if abs(moments["m00"]) > 1e-6:
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
+        center = 0.5 * mean_center + 0.5 * np.array([cx, cy], dtype=np.float32)
+    else:
+        center = mean_center
+
+    return (float(center[0]), float(center[1]))
+
+
 # ===========================================================================
 # CoordinateMapper
 # ===========================================================================
@@ -415,13 +535,19 @@ class CoordinateMapper:
         """
         original_positions = CoordinateMapper.calculate_original_marker_positions()
 
+        gray = None
+        if image_bgr is not None and len(image_bgr.shape) == 3:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        elif image_bgr is not None:
+            gray = image_bgr
+
         # Collect raw detections
         raw: Dict[str, Tuple[float, float]] = {}
         for i, mi in enumerate(detected_markers):
             cn = mi.get("corner")
             if cn not in original_positions:
                 continue
-            raw[cn] = CoordinateMapper.calculate_marker_center(corners_data[i][0])
+            raw[cn] = _refine_marker_center_subpixel(corners_data[i][0], gray)
 
         print(f"  Raw detections: {sorted(raw.keys())}")
 
@@ -433,22 +559,23 @@ class CoordinateMapper:
 
         print(f"  After quadrant filter: {sorted(clean.keys())}")
 
-        # Step 2: convexity check on 4 markers
-        if len(clean) == 4 and not _is_convex_quad(clean):
-            print("  4 markers not convex — trying to drop outlier...")
-            best, best_score = None, float('inf')
+        # Step 2: full geometry consistency on 4 markers
+        if len(clean) == 4 and not _is_plausible_quad(clean):
+            print("  4 markers geometrically inconsistent — trying outlier drop...")
+            best, best_score = None, float("inf")
             for drop in list(clean.keys()):
                 candidate = {k: v for k, v in clean.items() if k != drop}
                 mn, mp = _estimate_missing(candidate)
-                test = dict(candidate); test[mn] = mp
-                if _is_convex_quad(test):
-                    score = np.linalg.norm(np.array(clean[drop]) - np.array(test[drop]))
+                test = dict(candidate)
+                test[mn] = mp
+                if _is_plausible_quad(test):
+                    score = _geometry_error_score(test)
                     if score < best_score:
                         best_score = score
-                        best = (candidate, drop)
+                        best = test
             if best is not None:
-                clean, dropped = best
-                print(f"  Dropped outlier '{dropped}' (err={best_score:.1f}px)")
+                clean = best
+                print(f"  Resolved outlier via min-geometry-error (score={best_score:.4f})")
 
         n = len(clean)
 
@@ -463,15 +590,21 @@ class CoordinateMapper:
             all_corners_img = dict(clean)
             all_corners_img[mn] = mp
             estimated_names.add(mn)
+            if not _is_plausible_quad(all_corners_img):
+                raise ValueError("3-marker reconstruction failed geometry validation.")
         elif n == 2:
             all_corners_img = CoordinateMapper.reconstruct_from_two_markers(clean)
             estimated_names = set(all_corners_img.keys()) - set(clean.keys())
+            if not _is_plausible_quad(all_corners_img):
+                raise ValueError("2-marker reconstruction failed geometry validation.")
         elif n == 1 and image_w > 0 and image_h > 0:
             print("  1 marker — estimating from document layout + image size")
             all_corners_img = CoordinateMapper.reconstruct_from_one_marker(
                 clean, image_w, image_h
             )
             estimated_names = set(all_corners_img.keys()) - set(clean.keys())
+            if not _is_plausible_quad(all_corners_img):
+                raise ValueError("1-marker reconstruction failed geometry validation.")
         else:
             # Step 4: no usable markers — try image-based fallbacks
             if image_bgr is not None:
@@ -502,51 +635,42 @@ class CoordinateMapper:
         all_corners_img: Dict[str, Tuple[float, float]]
     ) -> List[Tuple[float, float]]:
         """
-        Step each marker outward by MARGIN + MARKER_SIZE/2 along the locally
-        measured document axes to reach the true page edges.
+        Compute page boundary by fitting doc->image homography from marker centers
+        and projecting the true document rectangle.
         Returns [TL, TR, BR, BL] in image space.
         """
         required = {"top_left", "top_right", "bottom_right", "bottom_left"}
         if not required.issubset(all_corners_img.keys()):
             raise ValueError(f"Need all 4 corners, got {set(all_corners_img.keys())}")
 
-        tl = np.array(all_corners_img["top_left"],     dtype=np.float64)
-        tr = np.array(all_corners_img["top_right"],    dtype=np.float64)
-        br = np.array(all_corners_img["bottom_right"], dtype=np.float64)
-        bl = np.array(all_corners_img["bottom_left"],  dtype=np.float64)
+        original_positions = CoordinateMapper.calculate_original_marker_positions()
+        src_doc_marker_centers = np.array(
+            [original_positions[name]["center"] for name in CORNER_ORDER],
+            dtype=np.float32,
+        )
+        dst_img_marker_centers = np.array(
+            [all_corners_img[name] for name in CORNER_ORDER],
+            dtype=np.float32,
+        )
 
-        offset_doc = MarkerConfig.MARGIN + MarkerConfig.MARKER_SIZE / 2.0  # 54
+        H_doc_to_img = cv2.getPerspectiveTransform(
+            src_doc_marker_centers,
+            dst_img_marker_centers,
+        )
 
-        h_raw = ((tr - tl) + (br - bl)) / 2.0
-        h_len = float(np.linalg.norm(h_raw))
-        if h_len < 1e-6:
-            raise ValueError("Degenerate layout: zero horizontal span.")
-        h_hat = h_raw / h_len
-
-        v_raw = ((bl - tl) + (br - tr)) / 2.0
-        v_len = float(np.linalg.norm(v_raw))
-        if v_len < 1e-6:
-            raise ValueError("Degenerate layout: zero vertical span.")
-        v_hat = v_raw / v_len
-
-        inter_h_doc = MarkerConfig.DOC_WIDTH  - 2.0 * offset_doc
-        inter_v_doc = MarkerConfig.DOC_HEIGHT - 2.0 * offset_doc
-
-        h_scale = (
-            (float(np.linalg.norm(tr - tl)) + float(np.linalg.norm(br - bl))) / 2.0
-        ) / inter_h_doc
-        v_scale = (
-            (float(np.linalg.norm(bl - tl)) + float(np.linalg.norm(br - tr))) / 2.0
-        ) / inter_v_doc
-
-        delta_h = offset_doc * h_scale * h_hat
-        delta_v = offset_doc * v_scale * v_hat
+        W = float(MarkerConfig.DOC_WIDTH)
+        H = float(MarkerConfig.DOC_HEIGHT)
+        doc_page_corners = np.array(
+            [[[0.0, 0.0], [W, 0.0], [W, H], [0.0, H]]],
+            dtype=np.float32,
+        )
+        proj = cv2.perspectiveTransform(doc_page_corners, H_doc_to_img)[0]
 
         return [
-            (float((tl - delta_h - delta_v)[0]), float((tl - delta_h - delta_v)[1])),
-            (float((tr + delta_h - delta_v)[0]), float((tr + delta_h - delta_v)[1])),
-            (float((br + delta_h + delta_v)[0]), float((br + delta_h + delta_v)[1])),
-            (float((bl - delta_h + delta_v)[0]), float((bl - delta_h + delta_v)[1])),
+            (float(proj[0][0]), float(proj[0][1])),
+            (float(proj[1][0]), float(proj[1][1])),
+            (float(proj[2][0]), float(proj[2][1])),
+            (float(proj[3][0]), float(proj[3][1])),
         ]
 
     # ------------------------------------------------------------------
@@ -602,6 +726,11 @@ class CoordinateMapper:
     # Dewarping
     # ------------------------------------------------------------------
 
+
+    # ------------------------------------------------------------------
+    # Dewarping
+    # ------------------------------------------------------------------
+
     @staticmethod
     def dewarp_document(
         image: np.ndarray,
@@ -637,9 +766,7 @@ class CoordinateMapper:
             dst      = np.array([[0,0],[0,H],[W,H],[W,0]], dtype=np.float32)
             out_size = (int(H), int(W))
 
-        H_mat, _ = cv2.findHomography(src, dst, 0)
-        if H_mat is None:
-            return None
+        H_mat = cv2.getPerspectiveTransform(src, dst)
 
         warped = cv2.warpPerspective(image, H_mat, out_size,
                                      flags=cv2.INTER_LINEAR,

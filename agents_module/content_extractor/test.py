@@ -8,13 +8,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agents_module.content_extractor.extractor import (  # noqa: E402
-    GCVSectionExtractor,
+    OpenAISectionExtractor,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Google Cloud Vision OCR on section images."
+        description="Run OpenAI vision extraction on section images."
     )
     parser.add_argument(
         "--folder",
@@ -27,9 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to save JSON output.",
     )
     parser.add_argument(
-        "--credentials",
+        "--model",
         default=None,
-        help="Optional path to GCV service account JSON credentials.",
+        help="Optional OpenAI model override.",
     )
     return parser
 
@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    extractor = GCVSectionExtractor(credentials_path=args.credentials)
+    extractor = OpenAISectionExtractor(model=args.model)
     results = extractor.extract_folder(args.folder)
 
     output_path = Path(args.output)

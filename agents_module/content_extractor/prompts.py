@@ -1,70 +1,60 @@
-"""Type-specific prompts for section-level OCR + LLM extraction."""
+"""Type-specific prompts for section-level OpenAI vision extraction."""
 
 QUESTION_EXTRACTION_PROMPT = """
-You analyze one exam section image.
+You are analyzing a single scanned exam section image.
 
-Extract:
-1) printed question text
-2) handwritten student answer written with pen
-3) confidence score in [0, 1]
+Tasks:
+1. Read the printed question or instruction text.
+2. Detect the student's handwritten answer written with pen or pencil.
+3. Ignore decorative shapes, page noise, and repeated printed examples.
+4. Estimate a confidence score between 0 and 1.
 
 Rules:
-- Focus on the student's handwritten response, not printed examples.
-- If no handwritten answer exists, set student_answer to null.
-- Keep question concise but faithful to image text.
-- Return ONLY valid JSON.
-
-JSON schema:
-{
-  "question": "string or null",
-  "student_answer": "string or null",
-  "confidence": 0.0
-}
+- Prioritize real student handwriting over printed content.
+- Preserve the student's wording and spelling as written.
+- If handwriting is partly unreadable, keep the readable text and use
+  [illegible]
+  only where necessary.
+- If no student answer exists in the section, set student_answer to null.
+- Return valid JSON only, with no markdown and no explanation.
 """.strip()
 
 
 HANDWRITTEN_ANSWER_PROMPT = """
-You analyze one exam section image.
+You are analyzing an answer zone from a scanned school exam.
 
-Priority:
-- Detect pen-written student answer with high recall.
-- Ignore decorative elements and most printed instructions.
+Primary goal:
+- Extract the student's handwritten answer with high recall.
+
+Secondary goal:
+- Capture the related printed question text only if it is clearly visible.
 
 Rules:
-- Keep the student's original wording/spelling.
-- If handwriting is partially unreadable, include readable part and
-  use [illegible] for unclear parts.
-- If there is no handwritten answer, set student_answer to null.
-- Return ONLY valid JSON.
-
-JSON schema:
-{
-  "question": "string or null",
-  "student_answer": "string or null",
-  "confidence": 0.0
-}
+- Focus on pen or pencil marks made by the student.
+- Ignore printed instructions unless they are needed to understand the answer.
+- Do not invent missing words.
+- If no handwritten answer is present, set student_answer to null.
+- Return valid JSON only, with no markdown and no explanation.
 """.strip()
 
 
 INSTRUCTION_PROMPT = """
-You analyze one exam section image that may contain instructions.
+You are analyzing an instruction or mixed-content exam section.
 
-Extract:
-- printed instruction/question text if present
-- handwritten student answer if any
+Tasks:
+- Extract the printed instruction or question text.
+- Extract any handwritten student answer if one is present.
 
 Rules:
-- For pure instruction sections, student_answer is usually null.
-- Do not hallucinate missing text.
-- Return ONLY valid JSON.
-
-JSON schema:
-{
-  "question": "string or null",
-  "student_answer": "string or null",
-  "confidence": 0.0
-}
+- Many instruction sections have no student answer; in that case use null.
+- Ignore layout artifacts and repeated printed labels.
+- Do not hallucinate text that is not visible.
+- Return valid JSON only, with no markdown and no explanation.
 """.strip()
+
+
+QUESTION_PROMPT = QUESTION_EXTRACTION_PROMPT
+ANSWER_EXTRACTION_PROMPT = HANDWRITTEN_ANSWER_PROMPT
 
 
 SECTION_TYPE_TO_PROMPT = {

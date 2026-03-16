@@ -24,15 +24,6 @@ EXAM CONTEXT
   incomplete, or irregular — this is normal and expected.
 - Math symbols used: + − × ÷ = (sometimes written as x or *)
 
-Math transcription rules (output normalization):
-- Use only Western digits: 0 1 2 3 4 5 6 7 8 9.
-- For arithmetic equations, output canonical math order:
-    left_operand operator right_operand = result.
-- Do NOT mirror equations because of Arabic direction.
-- Example:
-    If visually read as "3380 = 2870 - 6250", output
-    "6250 - 2870 = 3380".
-
 Arabic reading rules:
 - Arabic text MUST always be interpreted and reproduced from RIGHT → LEFT.
 - When Arabic text and numbers appear together, preserve the exact
@@ -92,6 +83,10 @@ GENERAL RULES
 - DO NOT correct spelling, grammar, or arithmetic errors.
 - DO NOT translate any text.
 - DO NOT invent or hallucinate content not visible in the image.
+- Use Western digits only: 0 1 2 3 4 5 6 7 8 9.
+- Do not output Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩).
+- Do not insert decimal dots inside integer values.
+- Example: write 1150 (not 11.50), 3405 (not 34.05).
 - Preserve diacritics (تشكيل) exactly as written.
 - Preserve punctuation and symbols exactly.
 - For illegible words: write [illegible].

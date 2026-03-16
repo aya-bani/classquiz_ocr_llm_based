@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--folder",
-        default="Exams/google_vision/prod/splited images into sections/exam_1",
+        default="Exams/sections",
         help="Folder containing section images.",
     )
     parser.add_argument(

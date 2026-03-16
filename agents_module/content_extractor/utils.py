@@ -10,9 +10,19 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def get_section_number(filename: str) -> int:
-    """Extract section number from names like exam_1_section_2.jpg."""
-    match = re.search(r"section[_\s-](\d+)", filename, re.IGNORECASE)
-    return int(match.group(1)) if match else -1
+    """Extract section number from common section-image file names."""
+    patterns = [
+        r"section[_\s-](\d+)",
+        r"(?:^|[_\s-])p(\d+)(?:\.[^.]+)?$",
+        r"(?:^|[_\s-])(\d+)(?:\.[^.]+)?$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+    return -1
 
 
 def load_images(folder: Path) -> List[Path]:

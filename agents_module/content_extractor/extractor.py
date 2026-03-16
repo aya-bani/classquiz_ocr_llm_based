@@ -95,9 +95,10 @@ class OpenAISectionExtractor:
                         {
                             "role": "system",
                             "content": (
-                                "You are an expert at reading scanned school "
-                                "exams. "
-                                "Return only valid JSON."
+                                "You read scanned school exams, including "
+                                "Arabic text and children's handwriting. "
+                                "Preserve wording exactly as written and "
+                                "return only valid JSON."
                             ),
                         },
                         {

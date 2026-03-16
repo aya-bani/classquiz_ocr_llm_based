@@ -2,6 +2,7 @@
 
 import base64
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -26,6 +27,71 @@ DEFAULT_MAX_TOKENS = 1000
 DEFAULT_TIMEOUT_SECONDS = 90
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 20
+
+_EASTERN_TO_WESTERN_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+
+
+def _to_western_digits(text: str) -> str:
+    """Convert Eastern Arabic digits to Western digits."""
+    return text.translate(_EASTERN_TO_WESTERN_DIGITS)
+
+
+def _parse_number(value: str) -> Optional[float]:
+    """Parse integer/decimal number from text segment."""
+    try:
+        return float(value.strip())
+    except ValueError:
+        return None
+
+
+def _fix_math_line(line: str) -> str:
+    """Normalize one arithmetic line to canonical math order."""
+    cleaned = _to_western_digits(line)
+    cleaned = cleaned.replace("−", "-").replace("×", "*").replace("÷", "/")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if "=" not in cleaned:
+        return cleaned
+
+    lhs, rhs = [part.strip() for part in cleaned.split("=", 1)]
+    has_expr_rhs = bool(re.search(r"\d+\s*[+\-*/]\s*\d+", rhs))
+    lhs_is_number = bool(re.fullmatch(r"-?\d+(?:\.\d+)?", lhs))
+    if lhs_is_number and has_expr_rhs:
+        cleaned = f"{rhs} = {lhs}"
+
+    match = re.fullmatch(
+        (
+            r"\s*(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*"
+            r"(-?\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)\s*"
+        ),
+        cleaned,
+    )
+    if not match:
+        return cleaned
+
+    a_txt, op, b_txt, c_txt = match.groups()
+    a = _parse_number(a_txt)
+    b = _parse_number(b_txt)
+    c = _parse_number(c_txt)
+    if a is None or b is None or c is None:
+        return cleaned
+
+    eps = 1e-6
+    if op == "-" and abs((a - b) - c) > eps and abs((b - a) - c) <= eps:
+        return f"{b_txt} - {a_txt} = {c_txt}"
+    if op == "/" and abs((a / b) - c) > eps and abs((b / a) - c) <= eps:
+        return f"{b_txt} / {a_txt} = {c_txt}"
+
+    return f"{a_txt} {op} {b_txt} = {c_txt}"
+
+
+def _normalize_math_text(text: Optional[str]) -> Optional[str]:
+    """Normalize multi-line extracted text while preserving line breaks."""
+    if not text:
+        return None
+    lines = text.splitlines()
+    normalized = [_fix_math_line(line) for line in lines]
+    return "\n".join(normalized)
 
 
 class OpenAISectionExtractor:
@@ -173,10 +239,17 @@ class OpenAISectionExtractor:
         student_answer = parsed.get("student_answer")
         confidence = parsed.get("confidence", 0.0)
 
+        question_norm = _normalize_math_text(question) if question else None
+        answer_norm = (
+            _normalize_math_text(student_answer)
+            if student_answer
+            else None
+        )
+
         return {
             "section_number": section_number,
-            "question": question if question else None,
-            "student_answer": student_answer if student_answer else None,
+            "question": question_norm,
+            "student_answer": answer_norm,
             "confidence": float(confidence or 0.0),
         }
 

@@ -1,7 +1,7 @@
 """
 prompts.py
 ────────────────────────────────────────────────────────────────────────────────
-Type-specific prompts for section-level OpenAI Vision extraction.
+Type-specific prompts for section-level Vision extraction.
 Optimized for:
   • Primary school children aged 5–11
   • Arabic handwriting (right-to-left)
@@ -21,8 +21,29 @@ EXAM CONTEXT
 - Students: primary school children aged 5 to 11 years old.
 - Language: mostly Arabic (read RIGHT → LEFT).
 - Handwriting: children's pen or pencil, often messy, uneven,
-  or incomplete — this is normal and expected.
-- Math symbols used: + − × ÷ = (and sometimes written as x or *)
+  incomplete, or irregular — this is normal and expected.
+- Math symbols used: + − × ÷ = (sometimes written as x or *)
+
+Math transcription rules (output normalization):
+- Use only Western digits: 0 1 2 3 4 5 6 7 8 9.
+- For arithmetic equations, output canonical math order:
+    left_operand operator right_operand = result.
+- Do NOT mirror equations because of Arabic direction.
+- Example:
+    If visually read as "3380 = 2870 - 6250", output
+    "6250 - 2870 = 3380".
+
+Arabic reading rules:
+- Arabic text MUST always be interpreted and reproduced from RIGHT → LEFT.
+- When Arabic text and numbers appear together, preserve the exact
+    visual order.
+
+Example:
+Image shows:   الناتج = 5
+Output must be: "الناتج = 5"
+
+NOT:
+"5 = الناتج"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PLACEMENT RULES  ⚠ CRITICAL — DO NOT VIOLATE
@@ -34,13 +55,36 @@ PLACEMENT RULES  ⚠ CRITICAL — DO NOT VIOLATE
    image must remain a separate line in your output.
 3. NEVER split one visual line into multiple lines.
 4. For math: preserve the layout of each operation exactly.
+
    Example:
-     Image shows:   3 + 4 = ___
-     Output must be: "3 + 4 = ___"   NOT "3+4=___" or "= 3 + 4"
+   Image shows:   3 + 4 = ___
+   Output must be: "3 + 4 = ___"
+
+   NOT:
+   "3+4=___"
+
 5. For multi-column layouts (e.g. two exercises side by side),
-   extract left column first, then right column — do NOT mix them.
-6. Blank answer zones must appear as "___" in the output,
-   exactly where they appear in the image.
+   extract the LEFT column first, then the RIGHT column.
+6. Blank answer zones must appear as "___" exactly where
+   they appear in the image.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHILD HANDWRITING BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Students are between 5 and 11 years old. Expect:
+
+- reversed numbers
+- uneven letter sizes
+- letters touching or disconnected
+- numbers written slightly outside answer boxes
+- spelling mistakes
+- inconsistent spacing
+
+Your task is to transcribe EXACTLY what the child wrote,
+NOT what the correct spelling or number should be.
+
+If a number looks reversed but clearly represents a digit,
+transcribe the intended digit.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 GENERAL RULES
@@ -49,65 +93,85 @@ GENERAL RULES
 - DO NOT translate any text.
 - DO NOT invent or hallucinate content not visible in the image.
 - Preserve diacritics (تشكيل) exactly as written.
-- For illegible words: write [illegible] in place — do not skip.
+- Preserve punctuation and symbols exactly.
+- For illegible words: write [illegible].
 - For crossed-out text: write [crossed out: <text>].
 - If student_answer is completely blank: return null.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CONFIDENCE SCORE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-0.90 – 1.00 : All text clearly legible, placement certain
-0.70 – 0.89 : Mostly legible, 1–2 uncertain words
-0.50 – 0.69 : Partially legible, some guessing required
-0.30 – 0.49 : Mostly illegible, high uncertainty
+0.90 – 1.00 : All text clearly legible
+0.70 – 0.89 : Mostly legible
+0.50 – 0.69 : Some uncertainty
+0.30 – 0.49 : Hard to read
 0.00 – 0.29 : Cannot extract reliably
 """.strip()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# OUTPUT SCHEMA — shared by all prompts
+# OUTPUT SCHEMA
 # ═════════════════════════════════════════════════════════════════════════════
 
 _JSON_SCHEMA = """
-Return ONLY valid JSON using this exact schema — no markdown, no explanation:
+Return ONLY valid JSON using this exact schema.
+
+Do NOT include markdown, explanation, or extra text.
+The response MUST start with "{" and end with "}".
+
 {
-  "question": "<printed question text, preserving exact layout>",
-  "student_answer": "<handwritten answer preserving exact layout, or null>",
+  "question": "<printed question text preserving layout>",
+  "student_answer": "<handwritten answer preserving layout, or null>",
   "confidence": <float 0.0–1.0>
 }
 """.strip()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PROMPT 1 — General question + answer extraction
+# PROMPT 1 — General question extraction
 # ═════════════════════════════════════════════════════════════════════════════
 
 QUESTION_EXTRACTION_PROMPT = f"""
-You are an OCR specialist extracting content from a primary school exam section.
+You are an OCR specialist extracting content from a primary school
+exam section.
 
 YOUR TASKS
 ──────────
 1. Extract the PRINTED question text exactly as it appears.
 2. Extract the HANDWRITTEN student answer exactly as written.
-3. Preserve the spatial layout of BOTH (see placement rules below).
+3. Preserve the spatial layout of BOTH.
 4. Assign a confidence score for the handwritten part.
 
 PRINTED vs HANDWRITTEN
 ──────────────────────
-- PRINTED text: typed font, uniform size, black ink → this is the question.
-- HANDWRITTEN text: irregular strokes, pen/pencil marks → this is the answer.
-- When in doubt: children's uneven writing = handwritten.
+Printed text:
+- uniform font
+- consistent spacing
+- printed ink
+
+Handwritten text:
+- irregular strokes
+- uneven spacing
+- variable stroke thickness
+- pen or pencil marks
+
+Children handwriting may appear messy.
 
 MATH-SPECIFIC INSTRUCTIONS
 ───────────────────────────
-- Preserve every number, operator, and equals sign exactly as placed.
-- A blank answer box or line after "=" is a student answer zone → show as "___".
-- If the student wrote a number after "=", that is student_answer.
-- Do NOT compute or verify the arithmetic.
-- Examples of correct extraction:
-    Image: "2 + 3 = 5"    → question: "2 + 3 = ___"   student_answer: "5"
-    Image: "7 − 4 = ___"  → question: "7 − 4 = ___"   student_answer: null
-    Image: "__ × 3 = 9"   → question: "__ × 3 = 9"    student_answer: null
+- Preserve every number, operator, and equals sign.
+- Blank answer areas must appear as "___".
+- If the student wrote a number after "=" it is the answer.
+
+ABSOLUTE RULE:
+Never verify or correct arithmetic.
+
+Example:
+Image: "2 + 3 = 6"
+
+Correct extraction:
+question: "2 + 3 = ___"
+student_answer: "6"
 
 {COMMON_EXTRACTION_CONTEXT}
 
@@ -116,34 +180,33 @@ MATH-SPECIFIC INSTRUCTIONS
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PROMPT 2 — Handwritten answer focus
+# PROMPT 2 — Handwritten focus
 # ═════════════════════════════════════════════════════════════════════════════
 
 HANDWRITTEN_ANSWER_PROMPT = f"""
-You are an OCR specialist focused on reading children's handwritten answers
-from a primary school exam answer zone.
+You are an OCR specialist focused on reading children's handwritten answers.
 
 YOUR PRIMARY GOAL
 ─────────────────
-Extract ONLY the student's handwritten answer with maximum recall.
-The printed question is secondary — include it only if clearly visible.
+Extract ONLY the student's handwritten answer with maximum accuracy.
 
 WHAT TO LOOK FOR
 ────────────────
-- Pen or pencil strokes written by a child (irregular, uneven pressure).
-- Numbers written by hand next to or inside printed answer boxes.
-- Words written in Arabic script by the student.
-- Circled options, ticked boxes, drawn lines/arrows (note these explicitly).
+- pen or pencil strokes
+- handwritten digits
+- handwritten Arabic words
+- circled options
+- ticked boxes
+- drawn arrows or lines
 
-MATH-SPECIFIC INSTRUCTIONS
-───────────────────────────
-- A handwritten digit after "=" is the student's answer → extract it.
-- Multiple handwritten numbers on separate lines → list each on its own line.
-- Preserve the EXACT position relative to the printed operation.
-  Example:
-    Printed:     "4 + 5 = "
-    Handwritten: "9" written after the equals sign
-    Output:      student_answer: "9"
+Preserve EXACT layout.
+
+Example:
+Printed: "4 + 5 = "
+Handwritten: "9"
+
+Output:
+student_answer: "9"
 
 {COMMON_EXTRACTION_CONTEXT}
 
@@ -152,26 +215,20 @@ MATH-SPECIFIC INSTRUCTIONS
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PROMPT 3 — Instruction / Enoncé section
-# ═════════════════════════════════════════════════════────────────────────────
+# PROMPT 3 — Instructions
+# ═════════════════════════════════════════════════════════════════════════════
 
 INSTRUCTION_PROMPT = f"""
-You are an OCR specialist extracting instruction text from a primary school exam.
-
-This section contains PRINTED instructions or context.
-Student answers are rarely present here.
+You are extracting instruction text from a primary school exam.
 
 YOUR TASKS
 ──────────
-1. Extract the full printed instruction text, preserving its exact layout.
-2. If a student wrote anything (notes, marks), capture it in student_answer.
-3. If no student writing exists, set student_answer to null.
+1. Extract printed instruction text exactly.
+2. Preserve layout and numbering.
+3. Capture any student writing if present.
 
-LAYOUT PRESERVATION
-────────────────────
-- Numbered instructions must remain numbered in the same order.
-- Bullet points or dashes must be preserved as-is.
-- Do not merge separate instruction lines.
+If no student writing exists:
+student_answer = null
 
 {COMMON_EXTRACTION_CONTEXT}
 
@@ -180,45 +237,46 @@ LAYOUT PRESERVATION
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PROMPT 4 — Math-specific (dedicated for pure arithmetic sections)
+# PROMPT 4 — Math operations
 # ═════════════════════════════════════════════════════════════════════════════
 
 MATH_EXTRACTION_PROMPT = f"""
-You are an OCR specialist extracting arithmetic exercises from a primary school
-math exam written by children aged 5–11.
+You are extracting arithmetic exercises from a primary school math exam.
 
 THIS SECTION CONTAINS MATH OPERATIONS.
 
 YOUR TASKS
 ──────────
-1. Extract every printed arithmetic operation exactly as it appears.
-2. Extract the student's handwritten answer for each operation.
-3. Preserve the EXACT layout — one operation per line, in order.
+1. Extract each printed operation.
+2. Extract the student's handwritten answer.
+3. Preserve exact layout.
 
-MATH LAYOUT RULES  ⚠ CRITICAL
-──────────────────────────────
-- Each operation is on its OWN line. Never merge two operations.
-- Preserve every operator: +  −  ×  ÷  =
-- Answer blanks appear as: ___  or  [ ]  or an empty space after =
-- The student writes their answer IN or NEXT TO the blank.
-- Extract each line as: "<operation> = <student answer or ___>"
-
-EXAMPLES OF CORRECT EXTRACTION
-────────────────────────────────
-Image contains (4 operations stacked vertically):
-  3 + 4 = 7        ← student wrote 7
-  8 − 3 = ___      ← student left blank
-  2 × 5 = 11       ← student wrote 11 (wrong, but preserve it)
-  12 ÷ 4 = 3       ← student wrote 3
-
-Correct student_answer output:
-  "3 + 4 = 7\\n8 − 3 = ___\\n2 × 5 = 11\\n12 ÷ 4 = 3"
+MATH RULES
+──────────
+- Each operation is one line.
+- Preserve operators: + − × ÷ =
+- Preserve answer blanks.
 
 NEVER:
-- Compute the correct answer.
-- Change the order of operations.
-- Merge lines.
-- Fix the student's mistakes.
+- compute answers
+- change order
+- fix student mistakes
+
+Example:
+
+Image:
+
+3 + 4 = 7
+8 − 3 = ___
+2 × 5 = 11
+12 ÷ 4 = 3
+
+Correct student_answer:
+
+"3 + 4 = 7
+8 − 3 = ___
+2 × 5 = 11
+12 ÷ 4 = 3"
 
 {COMMON_EXTRACTION_CONTEXT}
 
@@ -227,40 +285,46 @@ NEVER:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PROMPT MAP — keyed by section/question type
+# PROMPT MAP
 # ═════════════════════════════════════════════════════════════════════════════
 
-SECTION_TYPE_TO_PROMPT: dict = {
-    # Section type keys (used by the pipeline)
-    "question":         QUESTION_EXTRACTION_PROMPT,
-    "answer_zone":      HANDWRITTEN_ANSWER_PROMPT,
-    "instruction":      INSTRUCTION_PROMPT,
-    "math":             MATH_EXTRACTION_PROMPT,
-    "unknown":          QUESTION_EXTRACTION_PROMPT,
+SECTION_TYPE_TO_PROMPT = {
 
-    # AgentsConfig question type keys (used by orchestrator)
-    "ENONCE":           INSTRUCTION_PROMPT,
-    "MULTIPLE_CHOICE":  QUESTION_EXTRACTION_PROMPT,
-    "TRUE_FALSE":       QUESTION_EXTRACTION_PROMPT,
-    "FILL_BLANK":       QUESTION_EXTRACTION_PROMPT,
-    "RELATING":         QUESTION_EXTRACTION_PROMPT,
-    "WRITING":          HANDWRITTEN_ANSWER_PROMPT,
-    "SHORT_ANSWER":     QUESTION_EXTRACTION_PROMPT,
-    "CALCULATION":      MATH_EXTRACTION_PROMPT,
-    "DIAGRAM":          QUESTION_EXTRACTION_PROMPT,
-    "TABLE":            QUESTION_EXTRACTION_PROMPT,
-    "UNKNOWN":          QUESTION_EXTRACTION_PROMPT,
+    "question": QUESTION_EXTRACTION_PROMPT,
+    "answer_zone": HANDWRITTEN_ANSWER_PROMPT,
+    "instruction": INSTRUCTION_PROMPT,
+    "math": MATH_EXTRACTION_PROMPT,
+    "unknown": QUESTION_EXTRACTION_PROMPT,
+
+    "ENONCE": INSTRUCTION_PROMPT,
+    "MULTIPLE_CHOICE": QUESTION_EXTRACTION_PROMPT,
+    "TRUE_FALSE": QUESTION_EXTRACTION_PROMPT,
+    "FILL_BLANK": QUESTION_EXTRACTION_PROMPT,
+    "RELATING": QUESTION_EXTRACTION_PROMPT,
+    "WRITING": HANDWRITTEN_ANSWER_PROMPT,
+    "SHORT_ANSWER": QUESTION_EXTRACTION_PROMPT,
+    "CALCULATION": MATH_EXTRACTION_PROMPT,
+    "DIAGRAM": QUESTION_EXTRACTION_PROMPT,
+    "TABLE": QUESTION_EXTRACTION_PROMPT,
+    "UNKNOWN": QUESTION_EXTRACTION_PROMPT,
 }
 
-# Convenience aliases
-QUESTION_PROMPT        = QUESTION_EXTRACTION_PROMPT
+
+QUESTION_PROMPT = QUESTION_EXTRACTION_PROMPT
 ANSWER_EXTRACTION_PROMPT = HANDWRITTEN_ANSWER_PROMPT
 
 
 def get_prompt(section_type: str) -> str:
-    """Return the extraction prompt for a given section or question type."""
+    if not section_type:
+        return QUESTION_EXTRACTION_PROMPT
+
+    key_upper = section_type.upper()
+    key_lower = section_type.lower()
+
     return SECTION_TYPE_TO_PROMPT.get(
-        section_type.upper() if section_type.upper() in SECTION_TYPE_TO_PROMPT
-        else section_type.lower(),
-        QUESTION_EXTRACTION_PROMPT,
+        key_upper,
+        SECTION_TYPE_TO_PROMPT.get(
+            key_lower,
+            QUESTION_EXTRACTION_PROMPT
+        )
     )

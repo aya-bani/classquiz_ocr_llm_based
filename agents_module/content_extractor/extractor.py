@@ -17,6 +17,7 @@ from .utils import (
     extract_json_from_text,
     get_section_number,
     load_images,
+    normalize_student_answer,
     sort_results,
 )
 
@@ -115,6 +116,33 @@ class OpenAISectionExtractor:
             section_type=effective_type,
         )
 
+        # RELATING sections often fail when model pairs same-row items.
+        # Run a stricter pass focused only on student-drawn links.
+        if str(effective_type).upper() == "RELATING":
+            strict_instruction = (
+                instruction
+                + "\n\nRELATING STRICT MODE:\n"
+                + "- Use ONLY student-drawn arrows/lines/circled links.\n"
+                + "- If arrows exist, follow arrow start/end points only.\n"
+                + "- Do NOT pair by row proximity or nearest text.\n"
+                + "- Do NOT infer pairs from same-line placement.\n"
+                + "- If a link is unclear, skip it instead of guessing."
+            )
+            parsed_rel, error_rel = self._request_model_json(
+                strict_instruction,
+                image_url,
+            )
+            if not error_rel:
+                strict_result = self._normalize_result(
+                    parsed_rel or {},
+                    section_number,
+                    section_type=effective_type,
+                )
+                primary_result = self._select_better_relating_result(
+                    primary_result,
+                    strict_result,
+                )
+
         # Section 5 has recurrent faint handwriting near bold text.
         # Run a second pass on an enhanced image and keep the stronger result.
         if section_number != 5:
@@ -202,8 +230,11 @@ class OpenAISectionExtractor:
             "Return valid JSON only using this schema:\n"
             "{\n"
             '  "section_number": integer,\n'
+            '  "question_type": string,\n'
             '  "question": string or null,\n'
+            '  "options": array or null,\n'
             '  "student_answer": string or null,\n'
+            '  "metadata": object or null,\n'
             '  "confidence": number\n'
             "}\n"
             "If the student answer does not exist, use null."
@@ -259,6 +290,34 @@ class OpenAISectionExtractor:
         return secondary if _score(secondary) > _score(primary) else primary
 
     @staticmethod
+    def _select_better_relating_result(primary: Dict, secondary: Dict) -> Dict:
+        """Prefer RELATING result with clearer student-link evidence."""
+
+        def _rel_score(item: Dict) -> float:
+            answer = str(item.get("student_answer") or "")
+            conf = float(item.get("confidence") or 0.0)
+            arrow_count = answer.count("→") + answer.count("->")
+            pair_count = len(
+                [p.strip() for p in answer.split(",") if "→" in p or "->" in p]
+            )
+            return (conf * 100.0) + (arrow_count * 12.0) + (pair_count * 8.0)
+
+        p_answer = str(primary.get("student_answer") or "")
+        s_answer = str(secondary.get("student_answer") or "")
+
+        # Prefer explicit arrow mappings when primary has none.
+        if ("→" not in p_answer and "->" not in p_answer) and (
+            "→" in s_answer or "->" in s_answer
+        ):
+            return secondary
+
+        return (
+            secondary
+            if _rel_score(secondary) > _rel_score(primary)
+            else primary
+        )
+
+    @staticmethod
     def _normalize_result(
         parsed: Dict,
         section_number: int,
@@ -268,6 +327,12 @@ class OpenAISectionExtractor:
         question = _standardize_numeric_text(parsed.get("question"))
         student_answer = _standardize_numeric_text(
             parsed.get("student_answer")
+        )
+        options = OpenAISectionExtractor._normalize_options(
+            parsed.get("options")
+        )
+        metadata = OpenAISectionExtractor._normalize_metadata(
+            parsed.get("metadata")
         )
         confidence = parsed.get("confidence", 0.0)
 
@@ -289,30 +354,48 @@ class OpenAISectionExtractor:
                 section_number,
             )
         )
-        question, student_answer = (
-            OpenAISectionExtractor._postprocess_by_type(
-                section_type,
-                question,
-                student_answer,
-            )
+        payload = {
+            "question": question,
+            "student_answer": student_answer,
+            "options": options,
+            "metadata": metadata,
+        }
+        payload = OpenAISectionExtractor.postprocess_by_type(
+            section_type,
+            payload,
+        )
+        question = payload.get("question")
+        student_answer = payload.get("student_answer")
+        options = payload.get("options")
+        metadata = payload.get("metadata")
+        student_answer = normalize_student_answer(
+            student_answer or "",
+            section_type,
         )
 
         return {
             "section_number": section_number,
-            "question": question if question else None,
-            "student_answer": student_answer if student_answer else None,
+            "question_type": str(section_type or "unknown").upper(),
+            "question": question if question else "",
+            "options": options,
+            "student_answer": student_answer if student_answer else "",
+            "metadata": metadata,
             "confidence": float(confidence or 0.0),
         }
 
     @staticmethod
-    def _postprocess_by_type(
+    def postprocess_by_type(
         section_type: str,
-        question: Optional[str],
-        student_answer: Optional[str],
-    ) -> tuple[Optional[str], Optional[str]]:
+        result: Dict,
+    ) -> Dict:
         """Apply lightweight formatting rules depending on question type."""
+        question = result.get("question")
+        student_answer = result.get("student_answer")
+        options = result.get("options")
+        metadata = result.get("metadata")
+
         if not student_answer:
-            return question, student_answer
+            return result
 
         stype = str(section_type or "unknown").upper()
         answer = str(student_answer).strip()
@@ -324,13 +407,20 @@ class OpenAISectionExtractor:
                 for m in [m.upper() for m in marks]:
                     if m not in deduped:
                         deduped.append(m)
-                return question, ", ".join(deduped)
+                answer = ", ".join(deduped)
+            if options is None:
+                options = []
 
         if stype == "RELATING":
-            normalized = re.sub(r"\s*(?:->|=>|=|to)\s*", "→", answer)
-            normalized = re.sub(r"\s*,\s*", ", ", normalized)
-            normalized = re.sub(r"\s+", " ", normalized).strip()
-            return question, normalized
+            normalized = OpenAISectionExtractor._normalize_relating_chains(
+                answer
+            )
+            answer = normalized
+            if metadata is None:
+                metadata = {}
+            metadata["pairs"] = [
+                p.strip() for p in normalized.split(",") if p.strip()
+            ]
 
         if stype == "TABLE":
             lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
@@ -341,15 +431,12 @@ class OpenAISectionExtractor:
                 if "|" in norm and not re.search(r"^row\s*\d+", norm, re.I):
                     norm = f"Row{idx}: {norm}"
                 cleaned_lines.append(norm)
-            return (
-                question,
-                "\n".join(cleaned_lines) if cleaned_lines else answer,
-            )
+            answer = "\n".join(cleaned_lines) if cleaned_lines else answer
 
         if stype == "FILL_BLANK":
             tokens = re.findall(r"[\w\u0600-\u06FF]+", answer)
             if tokens:
-                return question, ", ".join(tokens)
+                answer = ", ".join(tokens)
 
         if stype == "TRUE_FALSE":
             normalized = answer
@@ -360,7 +447,7 @@ class OpenAISectionExtractor:
             normalized = re.sub(r"\bصح\b", "True", normalized)
             normalized = re.sub(r"\bخط[اأ]?\b", "False", normalized)
             normalized = re.sub(r"\s*,\s*", ", ", normalized)
-            return question, normalized.strip()
+            answer = normalized.strip()
 
         if stype == "CALCULATION":
             lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
@@ -373,12 +460,68 @@ class OpenAISectionExtractor:
                 for ln in normalized_lines
             ]
             if normalized_lines:
-                return question, "\n".join(normalized_lines)
+                answer = "\n".join(normalized_lines)
 
-        if stype in {"WRITING", "SHORT_ANSWER", "DIAGRAM", "ENONCE"}:
-            return question, answer
+        result["question"] = question
+        result["student_answer"] = answer
+        result["options"] = options
+        result["metadata"] = metadata
+        return result
 
-        return question, student_answer
+    @staticmethod
+    def _normalize_options(
+        raw_options: Optional[object],
+    ) -> Optional[List[str]]:
+        """Normalize options to a flat list of strings or None."""
+        if raw_options is None:
+            return None
+
+        if isinstance(raw_options, list):
+            normalized = []
+            for item in raw_options:
+                if isinstance(item, dict):
+                    text = (
+                        item.get("text")
+                        or item.get("label")
+                        or item.get("id")
+                    )
+                    if text is not None:
+                        normalized.append(str(text).strip())
+                else:
+                    normalized.append(str(item).strip())
+            normalized = [n for n in normalized if n]
+            return normalized if normalized else None
+
+        return [str(raw_options).strip()] if str(raw_options).strip() else None
+
+    @staticmethod
+    def _normalize_metadata(raw_metadata: Optional[object]) -> Optional[Dict]:
+        """Normalize metadata to a dict if available."""
+        if raw_metadata is None:
+            return None
+        if isinstance(raw_metadata, dict):
+            return raw_metadata
+        return {"raw_metadata": raw_metadata}
+
+    @staticmethod
+    def _normalize_relating_chains(answer: str) -> str:
+        """Normalize RELATING output while preserving multi-step chains."""
+        text = str(answer or "")
+        text = re.sub(r"\s*(?:->|=>|=|to)\s*", "→", text)
+        text = re.sub(r"[;\n]+", ",", text)
+        chunks = [c.strip() for c in text.split(",") if c.strip()]
+
+        normalized_chunks: List[str] = []
+        for chunk in chunks:
+            parts = [p.strip() for p in chunk.split("→") if p.strip()]
+            if len(parts) < 2:
+                continue
+            normalized_chunks.append("→".join(parts))
+
+        if normalized_chunks:
+            return ", ".join(normalized_chunks)
+
+        return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
     def _rebalance_math_fields(
@@ -578,8 +721,11 @@ class OpenAISectionExtractor:
         """Return a stable failure payload for a single section."""
         return {
             "section_number": section_number,
-            "question": None,
-            "student_answer": None,
+            "question_type": "UNKNOWN",
+            "question": "",
+            "options": None,
+            "student_answer": "",
+            "metadata": {"error": error_message},
             "confidence": 0.0,
             "error": error_message,
         }

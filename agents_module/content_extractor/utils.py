@@ -46,6 +46,52 @@ def sort_results(results: List[Dict]) -> List[Dict]:
     return sorted(results, key=lambda r: int(r.get("section_number", -1)))
 
 
+def normalize_student_answer(answer: str, question_type: str) -> str:
+    """Normalize student answer string by question type before grading."""
+    if answer is None:
+        return ""
+
+    text = str(answer).strip()
+    q_type = str(question_type or "").upper()
+
+    if not text:
+        return text
+
+    if q_type == "MULTIPLE_CHOICE":
+        marks = re.findall(r"[A-Da-d]", text)
+        if not marks:
+            return ""
+        seen = []
+        for mark in [m.upper() for m in marks]:
+            if mark not in seen:
+                seen.append(mark)
+        return ",".join(seen)
+
+    if q_type == "RELATING":
+        text = re.sub(r"\s*(?:->|=>|=|to)\s*", "→", text)
+
+    if q_type == "TRUE_FALSE":
+        text = re.sub(r"\bصح\b", "true", text)
+        text = re.sub(r"\bخط[اأ]?\b", "false", text)
+        text = text.replace("✓", "true")
+        text = text.replace("✔", "true")
+        text = text.replace("✗", "false")
+        text = text.replace("✘", "false")
+        text = re.sub(r"\bTrue\b", "true", text)
+        text = re.sub(r"\bFalse\b", "false", text)
+
+    # Remove duplicated comma-separated tokens while preserving order.
+    parts = [p.strip() for p in re.split(r"\s*,\s*", text) if p.strip()]
+    if parts:
+        deduped: List[str] = []
+        for part in parts:
+            if part not in deduped:
+                deduped.append(part)
+        return ", ".join(deduped)
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _looks_like_table(text: str) -> bool:
     """Heuristic for table-like content using separators or keywords."""
     if re.search(

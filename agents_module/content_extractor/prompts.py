@@ -114,9 +114,21 @@ Return ONLY valid JSON using this exact schema.
 Do NOT include markdown, explanation, or extra text.
 The response MUST start with "{" and end with "}".
 
+STRUCTURE CONSISTENCY RULE:
+- Output must be directly comparable with the correct_answer format.
+- Use standardized student_answer formats by type:
+    * MULTIPLE_CHOICE: "A"
+    * RELATING: "A→2, B→1"
+    * FILL_BLANK: "word1, word2"
+    * TRUE_FALSE: "true, false"
+    * TABLE: "Row1: v1 | v2\nRow2: v3 | v4"
+
 {
+    "question_type": "<UPPERCASE section type>",
   "question": "<printed question text preserving layout>",
+    "options": ["<option text>"] or null,
   "student_answer": "<handwritten answer preserving layout, or null>",
+    "metadata": {"<optional_type_specific_fields>": "..."} or null,
   "confidence": <float 0.0–1.0>
 }
 """.strip()
@@ -309,12 +321,35 @@ You are extracting a RELATING (matching) section.
 YOUR TASKS
 ──────────
 1. Extract printed matching statements exactly.
-2. Extract the student's mapping as pairs.
+2. Extract the student's mapping as pairs using ONLY student marks.
+
+CRITICAL FOR RELATING
+─────────────────────
+- Use ONLY explicit student evidence: drawn arrows, connecting lines,
+  circles around labels, or handwritten pair markers.
+- If student arrows are already drawn, map each pair from arrow start
+  point to arrow end point only.
+- NEVER pair items by vertical alignment or same-row proximity.
+- NEVER assume left item matches nearest right item when arrows exist.
+- If no visible student link is present for an item, do not invent a pair.
+- If the link target is ambiguous, keep the pair out and use metadata note.
 
 STUDENT ANSWER FORMAT
 ─────────────────────
 - Use one line or comma-separated pairs.
 - Canonical pair format: "A→2, B→1, C→3"
+- Multi-column chains are allowed and must be preserved.
+- Chain format example: "A→2→1, B→3→2" , "2←A→1, 3←B→2"
+-
+- If only part of a chain is visible, keep only visible links.
+
+EXAMPLE
+───────
+If the student draws an arrow from "طاقة" to option "حليب",
+output "طاقة→حليب" even if "طاقة" and "حليب" are on different rows.
+
+If the exercise has 3 columns and the student draws A→2 then 2→1,
+output "A→2→1" (do not collapse to "A→1").
 
 Do not invent missing pairs. Preserve what is visible.
 

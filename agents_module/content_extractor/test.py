@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--folder",
-        default="Exams/sections",
+        default="Exams/sections/sc",
         help="Folder containing section images.",
     )
     parser.add_argument(

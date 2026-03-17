@@ -80,6 +80,7 @@ class OpenAISectionExtractor:
                 self._extract_single_image(
                     image_path=image_path,
                     prompt=prompt,
+                    section_type=section_type,
                     section_number=section_number,
                 )
             )
@@ -90,6 +91,7 @@ class OpenAISectionExtractor:
         self,
         image_path: Path,
         prompt: str,
+        section_type: str,
         section_number: int,
     ) -> Dict:
         """Send one section image to OpenAI and parse the JSON response."""
@@ -100,7 +102,18 @@ class OpenAISectionExtractor:
         if error:
             return self._error_result(section_number, error)
 
-        primary_result = self._normalize_result(parsed or {}, section_number)
+        inferred_type = detect_section_type(
+            image_path,
+            extracted_text=str((parsed or {}).get("question") or ""),
+        )
+        effective_type = (
+            inferred_type if inferred_type != "unknown" else section_type
+        )
+        primary_result = self._normalize_result(
+            parsed or {},
+            section_number,
+            section_type=effective_type,
+        )
 
         # Section 5 has recurrent faint handwriting near bold text.
         # Run a second pass on an enhanced image and keep the stronger result.
@@ -123,6 +136,7 @@ class OpenAISectionExtractor:
         enhanced_result = self._normalize_result(
             parsed_2 or {},
             section_number,
+            section_type=effective_type,
         )
         return self._select_better_result(primary_result, enhanced_result)
 
@@ -245,7 +259,11 @@ class OpenAISectionExtractor:
         return secondary if _score(secondary) > _score(primary) else primary
 
     @staticmethod
-    def _normalize_result(parsed: Dict, section_number: int) -> Dict:
+    def _normalize_result(
+        parsed: Dict,
+        section_number: int,
+        section_type: str = "unknown",
+    ) -> Dict:
         """Normalize model output to the required schema."""
         question = _standardize_numeric_text(parsed.get("question"))
         student_answer = _standardize_numeric_text(
@@ -271,6 +289,13 @@ class OpenAISectionExtractor:
                 section_number,
             )
         )
+        question, student_answer = (
+            OpenAISectionExtractor._postprocess_by_type(
+                section_type,
+                question,
+                student_answer,
+            )
+        )
 
         return {
             "section_number": section_number,
@@ -278,6 +303,82 @@ class OpenAISectionExtractor:
             "student_answer": student_answer if student_answer else None,
             "confidence": float(confidence or 0.0),
         }
+
+    @staticmethod
+    def _postprocess_by_type(
+        section_type: str,
+        question: Optional[str],
+        student_answer: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Apply lightweight formatting rules depending on question type."""
+        if not student_answer:
+            return question, student_answer
+
+        stype = str(section_type or "unknown").upper()
+        answer = str(student_answer).strip()
+
+        if stype == "MULTIPLE_CHOICE":
+            marks = re.findall(r"[A-Da-d]", answer)
+            if marks:
+                deduped = []
+                for m in [m.upper() for m in marks]:
+                    if m not in deduped:
+                        deduped.append(m)
+                return question, ", ".join(deduped)
+
+        if stype == "RELATING":
+            normalized = re.sub(r"\s*(?:->|=>|=|to)\s*", "→", answer)
+            normalized = re.sub(r"\s*,\s*", ", ", normalized)
+            normalized = re.sub(r"\s+", " ", normalized).strip()
+            return question, normalized
+
+        if stype == "TABLE":
+            lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+            cleaned_lines = []
+            for idx, line in enumerate(lines, start=1):
+                norm = re.sub(r"\s*\|\s*", " | ", line)
+                norm = re.sub(r"\s+", " ", norm).strip()
+                if "|" in norm and not re.search(r"^row\s*\d+", norm, re.I):
+                    norm = f"Row{idx}: {norm}"
+                cleaned_lines.append(norm)
+            return (
+                question,
+                "\n".join(cleaned_lines) if cleaned_lines else answer,
+            )
+
+        if stype == "FILL_BLANK":
+            tokens = re.findall(r"[\w\u0600-\u06FF]+", answer)
+            if tokens:
+                return question, ", ".join(tokens)
+
+        if stype == "TRUE_FALSE":
+            normalized = answer
+            normalized = normalized.replace("✓", "True")
+            normalized = normalized.replace("✔", "True")
+            normalized = normalized.replace("✗", "False")
+            normalized = normalized.replace("✘", "False")
+            normalized = re.sub(r"\bصح\b", "True", normalized)
+            normalized = re.sub(r"\bخط[اأ]?\b", "False", normalized)
+            normalized = re.sub(r"\s*,\s*", ", ", normalized)
+            return question, normalized.strip()
+
+        if stype == "CALCULATION":
+            lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+            normalized_lines = [
+                re.sub(r"\s*([+\-×÷=])\s*", r" \1 ", ln)
+                for ln in lines
+            ]
+            normalized_lines = [
+                re.sub(r"\s+", " ", ln).strip()
+                for ln in normalized_lines
+            ]
+            if normalized_lines:
+                return question, "\n".join(normalized_lines)
+
+        if stype in {"WRITING", "SHORT_ANSWER", "DIAGRAM", "ENONCE"}:
+            return question, answer
+
+        return question, student_answer
 
     @staticmethod
     def _rebalance_math_fields(

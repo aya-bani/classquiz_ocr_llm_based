@@ -279,6 +279,187 @@ Correct student_answer:
 """.strip()
 
 
+MULTIPLE_CHOICE_PROMPT = f"""
+You are extracting a MULTIPLE_CHOICE section from a primary school exam.
+
+YOUR TASKS
+──────────
+1. Extract the printed question exactly.
+2. Detect which choice is selected by the student (circle, tick,
+     underline, or filled option).
+3. Put only selected choice(s) in student_answer.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- One selected choice: "A" or "B" or "C" ...
+- Multiple selected choices: "A, C"
+- If none is selected: null
+
+Never infer correctness, only detect marked options.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+RELATING_PROMPT = f"""
+You are extracting a RELATING (matching) section.
+
+YOUR TASKS
+──────────
+1. Extract printed matching statements exactly.
+2. Extract the student's mapping as pairs.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Use one line or comma-separated pairs.
+- Canonical pair format: "A→2, B→1, C→3"
+
+Do not invent missing pairs. Preserve what is visible.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+FILL_BLANK_PROMPT = f"""
+You are extracting a FILL_BLANK section.
+
+YOUR TASKS
+──────────
+1. Keep blanks in question exactly as "___" where they appear.
+2. Extract only the handwritten filled values in student_answer.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Comma-separated filled values, in visual order.
+- Example: "5, 12, 8"
+
+If nothing is filled, use null.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+TABLE_PROMPT = f"""
+You are extracting a TABLE section.
+
+YOUR TASKS
+──────────
+1. Extract printed headers and table content with alignment preserved.
+2. Extract student handwritten entries preserving row/column structure.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Use line-by-line row format.
+- Example:
+    "Row1: 3 | 5 | 7\nRow2: 2 | 4 | 6"
+
+Preserve empty cells as blank positions between separators.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+WRITING_PROMPT = f"""
+You are extracting a WRITING section.
+
+YOUR TASKS
+──────────
+1. Extract the printed writing prompt/instruction exactly.
+2. Focus on long handwritten student text with maximum fidelity.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Preserve line breaks and punctuation.
+- Do not summarize.
+- If blank, return null.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+DIAGRAM_PROMPT = f"""
+You are extracting a DIAGRAM section.
+
+YOUR TASKS
+──────────
+1. Extract printed labels/instructions around the diagram.
+2. Extract student annotations, labels, arrows, and handwritten notes.
+3. If calculations are present near the diagram, include them.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Structured plain text, keeping labels and calculations on separate lines.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+TRUE_FALSE_PROMPT = f"""
+You are extracting a TRUE_FALSE section.
+
+YOUR TASKS
+──────────
+1. Extract the printed statements exactly.
+2. Detect student's marked choice for each statement.
+
+STUDENT ANSWER FORMAT
+─────────────────────
+- Use sequence in visual order.
+- Example: "صح, خطأ, صح" or "True, False, True"
+- If marks are symbols, convert to textual form.
+
+Do not evaluate correctness.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+SHORT_ANSWER_PROMPT = f"""
+You are extracting a SHORT_ANSWER section.
+
+YOUR TASKS
+──────────
+1. Extract printed question text exactly.
+2. Extract the student's concise handwritten response exactly.
+
+Keep wording unchanged even if spelling is incorrect.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
+ENONCE_PROMPT = f"""
+You are extracting an ENONCE (instruction/statement) section.
+
+YOUR TASKS
+──────────
+1. Extract instruction text exactly with numbering and layout.
+2. Extract student handwriting only if present in this section.
+
+If there is no handwriting, student_answer must be null.
+
+{COMMON_EXTRACTION_CONTEXT}
+
+{_JSON_SCHEMA}
+""".strip()
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # PROMPT MAP
 # ═════════════════════════════════════════════════════════════════════════════
@@ -291,16 +472,16 @@ SECTION_TYPE_TO_PROMPT = {
     "math": MATH_EXTRACTION_PROMPT,
     "unknown": QUESTION_EXTRACTION_PROMPT,
 
-    "ENONCE": INSTRUCTION_PROMPT,
-    "MULTIPLE_CHOICE": QUESTION_EXTRACTION_PROMPT,
-    "TRUE_FALSE": QUESTION_EXTRACTION_PROMPT,
-    "FILL_BLANK": QUESTION_EXTRACTION_PROMPT,
-    "RELATING": QUESTION_EXTRACTION_PROMPT,
-    "WRITING": HANDWRITTEN_ANSWER_PROMPT,
-    "SHORT_ANSWER": QUESTION_EXTRACTION_PROMPT,
+    "ENONCE": ENONCE_PROMPT,
+    "MULTIPLE_CHOICE": MULTIPLE_CHOICE_PROMPT,
+    "TRUE_FALSE": TRUE_FALSE_PROMPT,
+    "FILL_BLANK": FILL_BLANK_PROMPT,
+    "RELATING": RELATING_PROMPT,
+    "WRITING": WRITING_PROMPT,
+    "SHORT_ANSWER": SHORT_ANSWER_PROMPT,
     "CALCULATION": MATH_EXTRACTION_PROMPT,
-    "DIAGRAM": QUESTION_EXTRACTION_PROMPT,
-    "TABLE": QUESTION_EXTRACTION_PROMPT,
+    "DIAGRAM": DIAGRAM_PROMPT,
+    "TABLE": TABLE_PROMPT,
     "UNKNOWN": QUESTION_EXTRACTION_PROMPT,
 }
 

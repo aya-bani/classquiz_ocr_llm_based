@@ -25,7 +25,7 @@ def _stem(p: Path) -> str:
 
 
 def _resolve_input(project_root: Path) -> Path:
-    base = project_root / "Exams" / "examen_corrige"
+    base = project_root / "Exams" / "new_real_exams" / "hand_writting_corrected_exam" / "sc3.jpg"
     if len(sys.argv) > 1:
         c = Path(sys.argv[1])
         return c if c.is_absolute() else base / c

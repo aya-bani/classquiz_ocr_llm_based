@@ -18,12 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--folder",
-        default="Exams/sections/sc",
+        default="data/Sections/svt",
         help="Folder containing section images.",
     )
     parser.add_argument(
         "--output",
-        default="agents_module/content_extractor/test_output.json",
+        default="agents_module/content_extractor/test_output_sc.json",
         help="Path to save JSON output.",
     )
     parser.add_argument(

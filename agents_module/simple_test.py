@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from agents_module.question_extractor_google_cloud import QuestionExtractorGoogleCloud
 
 IMAGE_PATH = Path(
-    r"Exams\google_vision\prod\splited images into sections\exam_1\exam_1_section_2.jpg"
+    r"Exams\google_vision\math\splited images into sections\exam_1\exam_1_section_3.jpg"
 )
 
 with QuestionExtractorGoogleCloud() as extractor:

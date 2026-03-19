@@ -11,3 +11,4 @@ agents_module/exam_20
 marker_module/marked_output
 Exams
 venv/
+google_cloud_vision.json

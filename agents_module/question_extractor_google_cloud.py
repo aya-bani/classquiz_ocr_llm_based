@@ -107,11 +107,11 @@ class QuestionExtractorGoogleCloud:
         self.executor    = ThreadPoolExecutor(max_workers=self.max_workers)
 
         # Google Cloud Vision client
-        if _GCV_CREDENTIALS and Path(_GCV_CREDENTIALS).exists():
-            self.vision_client = vision.ImageAnnotatorClient.from_service_account_file(
-                str(_GCV_CREDENTIALS)
+        if AgentsConfig.GOOGLE_API_KEY:
+            self.vision_client = vision.ImageAnnotatorClient(
+                client_options={"api_key": AgentsConfig.GOOGLE_API_KEY}
             )
-            self.logger.info(f"Cloud Vision client initialised from {_GCV_CREDENTIALS}")
+            self.logger.info(f"Cloud Vision client initialised with API key from AgentsConfig")
         else:
             self.vision_client = vision.ImageAnnotatorClient()
             self.logger.info("Cloud Vision client initialised via Application Default Credentials")

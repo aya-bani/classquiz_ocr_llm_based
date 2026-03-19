@@ -16,7 +16,9 @@ class ImageSplitter:
         Initialize the ImageSplitter with Google Vision API credentials
         """
         self.logger = LoggerManager.get_logger(__name__)
-        self.client = vision.ImageAnnotatorClient.from_service_account_file(str(LayoutConfig.CREDENTIALS_PATH))
+        self.client = vision.ImageAnnotatorClient(
+            client_options={"api_key": LayoutConfig.GOOGLE_API_KEY}
+        )
         self.logger.debug("Google Vision client initialized")
         self.logger.info("Initialized ImageSplitter and created directories")
 

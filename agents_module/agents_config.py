@@ -23,6 +23,8 @@ class AgentsConfig:
     MIN_INTERVAL = 60.0 / RATE_LIMIT
     GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-preview-04-17")
     GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    # GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH")
     
     # Prompt templates
     TEMPLATES_SUBMISSIONS = TEMPLATES_SUBMISSIONS_PROMPT

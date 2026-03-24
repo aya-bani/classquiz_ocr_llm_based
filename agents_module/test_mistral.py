@@ -13,11 +13,9 @@ from mistralai.client import Mistral
 api_key = os.environ["MISTRAL_API_KEY"]
 client = Mistral(api_key=api_key)
 
-# Configure paths - CHANGE THESE
-INPUT_FOLDER = "Exams/google_vision/math/splited images into sections/exam_1"
+INPUT_FOLDER = "Exams/sections/sc"
 OUTPUT_FOLDER = "Exams/extraction_results"
 
-# Create output folder
 Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 
 # ============================================
@@ -27,25 +25,20 @@ Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 def extract_section_number(filename):
     """Extract section number from filename"""
     numbers = re.findall(r'\d+', filename)
-    if numbers:
-        return numbers[0]
-    return "unknown"
+    return numbers[0] if numbers else "unknown"
 
 def encode_image(image_path):
-    """Convert image to base64"""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 def extract_student_answer(image_path):
     """
-    Extract ONLY the student's answer from the تعليمة section
-    Ignore السند (general question)
+    Extract ONLY the student's handwritten answer from التعليمة
+    Processes ONLY the FIRST page of each image
     """
     try:
-        # Encode image
         encoded_string = encode_image(image_path)
         
-        # OCR to get all text with layout
         ocr_response = client.ocr.process(
             model="mistral-ocr-latest",
             document={
@@ -55,43 +48,46 @@ def extract_student_answer(image_path):
             include_image_base64=True
         )
         
-        # Get raw text with structure
-        raw_text = ""
-        for page in ocr_response.pages:
-            raw_text += page.markdown + "\n"
+        if len(ocr_response.pages) == 0:
+            return {"student_answer": "", "note": "No pages found"}
+        
+        first_page = ocr_response.pages[0]
+        raw_text = first_page.markdown
         
         if not raw_text.strip():
-            return {
-                "student_answer": "",
-                "note": "No text detected"
-            }
+            return {"student_answer": "", "note": "No text detected on page 1"}
         
-        # Extract using LLM - only the student's answer section
-        system_prompt = """You extract student answers from exam images.
+        # PROMPT WITH REAL EXAMPLES
+        system_prompt = """You are an expert at extracting student answers from Arabic exam papers.
 
-In Arabic exam papers:
-- السند = The question text (what is being asked)
-- التعليمة = The student's answer area
+Structure:
+- السند (Sind): The story, problem context, or narrative
+- التعليمة (Talima): Contains TWO parts:
+   1. PRINTED INSTRUCTION: Words like "أَحْسُبُ", "أَكْمِلُ", "أَشْرَحُ", "لِمَاذَا", etc.
+   2. STUDENT'S HANDWRITTEN ANSWER: The actual calculation, response, or explanation
 
-Your task: Extract ONLY the student's answer from the تعليمة section.
-Ignore السند completely."""
+Your task: Extract ONLY the student's handwritten answer, NOT the printed instruction."""
 
         user_prompt = f"""
-From this exam image, extract ONLY the student's handwritten answer:
+Extract ONLY the student's handwritten answer from this exam section.
 
---- FULL IMAGE TEXT ---
+--- COMPLETE EXAM TEXT ---
 {raw_text}
 --- END ---
 
-Rules:
-1. Identify which part is السند (question) and which part is التعليمة (student answer)
-2. Extract ONLY the student's answer from التعليمة area
-3. Do NOT include the question text
-4. If multiple answers exist, combine them
-5. If no student answer is found, return empty string
-6. Return ONLY the student's answer text, no explanations
+**RULES:**
+1. Locate the التعليمة section
+2. Within التعليمة, identify:
+   - The printed instruction (starts with: أحسب, أكمل, أشرح, لماذا, etc.) → IGNORE
+   - The student's handwritten answer → EXTRACT THIS
+3. The student's answer can be:
+   - Mathematical calculations (numbers, +, -, =, ×, ÷)
+   - Arabic sentences or phrases
+   - Single words or numbers
+4. Preserve exact formatting
+5. Return empty string if no student answer found
 
-Student's Answer:
+**Student's Handwritten Answer:**
 """
 
         chat_response = client.chat.complete(
@@ -100,30 +96,27 @@ Student's Answer:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1
+            temperature=0.1,
+            max_tokens=2000
         )
         
         student_answer = chat_response.choices[0].message.content.strip()
         
         return {
             "student_answer": student_answer,
-            "full_ocr_text": raw_text[:300]  # Keep for reference
+            "note": "Student answer extracted" if student_answer else "No answer found",
+            "pages_processed": 1,
+            "total_pages_in_image": len(ocr_response.pages)
         }
         
     except Exception as e:
-        return {
-            "student_answer": "",
-            "error": str(e)
-        }
+        return {"student_answer": "", "error": str(e)}
 
 # ============================================
-# BATCH PROCESSING
+# BATCH PROCESSING - FIXED FOR DUPLICATES
 # ============================================
 
 def process_all_sections(folder_path):
-    """
-    Process all section images and extract student answers only
-    """
     folder = Path(folder_path)
     
     # Get all images
@@ -135,12 +128,24 @@ def process_all_sections(folder_path):
         print(f"❌ No images found in {folder_path}")
         return []
     
+    # ========== FIX: Remove duplicates by filename stem ==========
+    unique_images = {}
+    for img in images:
+        stem = img.stem  # Get filename without extension (e.g., "p1")
+        if stem not in unique_images:
+            unique_images[stem] = img
+        else:
+            print(f"⚠️  Duplicate found: {img.name} (keeping {unique_images[stem].name})")
+    
+    # Convert back to list
+    images = list(unique_images.values())
+    
     # Sort by section number
     images.sort(key=lambda x: extract_section_number(x.name))
     
     print(f"\n{'='*60}")
     print(f"📁 Processing folder: {folder_path}")
-    print(f"📸 Found {len(images)} section images")
+    print(f"📸 Found {len(images)} unique section images (after removing duplicates)")
     print(f"{'='*60}\n")
     
     results = []
@@ -148,23 +153,30 @@ def process_all_sections(folder_path):
     for idx, image_path in enumerate(images, 1):
         section_num = extract_section_number(image_path.name)
         print(f"[{idx}/{len(images)}] Section {section_num}: {image_path.name}")
-        print(f"  🔍 Extracting student answer from التعليمة...")
+        print(f"  🔍 Extracting student answer...")
         
-        # Extract student answer only
         extracted = extract_student_answer(str(image_path))
         
         result = {
             "section_number": section_num,
             "filename": image_path.name,
             "student_answer": extracted.get("student_answer", ""),
+            "note": extracted.get("note", ""),
+            "pages_processed": extracted.get("pages_processed", 1),
+            "total_pages_in_image": extracted.get("total_pages_in_image", 1),
             "error": extracted.get("error", None)
         }
         
         results.append(result)
         
-        # Print preview
-        answer_preview = result["student_answer"][:100] if result["student_answer"] else "[No student answer detected]"
-        print(f"  ✍️  Student answer: {answer_preview}...")
+        if result["student_answer"]:
+            answer_preview = result["student_answer"][:80]
+            print(f"  ✍️  Answer: {answer_preview}...")
+        else:
+            print(f"  📭 {result['note']}")
+        
+        if result["total_pages_in_image"] > 1:
+            print(f"  📄 Note: Image had {result['total_pages_in_image']} pages, processed only page 1")
         print()
     
     return results
@@ -174,34 +186,31 @@ def process_all_sections(folder_path):
 # ============================================
 
 def save_results(results, folder_path, output_folder):
-    """
-    Save extracted student answers to JSON
-    """
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
-    # Prepare output
     output_data = {
         "metadata": {
             "source_folder": folder_path,
             "total_sections": len(results),
             "extraction_date": datetime.now().isoformat(),
-            "extraction_type": "student_answers_from_talima"
+            "extraction_type": "student_handwritten_answers_only",
+            "note": "Each image processed as 1 section (first page only, duplicates removed)"
         },
         "results": results
     }
     
-    # Save JSON
     json_file = Path(output_folder) / f"student_answers_{timestamp}.json"
     with open(json_file, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
     
     print(f"\n💾 JSON saved to: {json_file}")
     
-    # Save simple text file
+    # Simple text file with only answers
     txt_file = Path(output_folder) / f"student_answers_{timestamp}.txt"
     with open(txt_file, 'w', encoding='utf-8') as f:
         f.write("="*60 + "\n")
-        f.write("STUDENT ANSWERS FROM التعليمة\n")
+        f.write("STUDENT HANDWRITTEN ANSWERS\n")
+        f.write(f"Extracted from التعليمة (ignoring printed instructions)\n")
         f.write(f"Date: {datetime.now().isoformat()}\n")
         f.write("="*60 + "\n\n")
         
@@ -212,7 +221,7 @@ def save_results(results, folder_path, output_folder):
             if result['student_answer']:
                 f.write(result['student_answer'] + "\n")
             else:
-                f.write("[No student answer detected]\n")
+                f.write("[No handwritten answer detected]\n")
             f.write("\n" + "="*60 + "\n\n")
     
     print(f"💾 Text file saved to: {txt_file}")
@@ -220,9 +229,6 @@ def save_results(results, folder_path, output_folder):
     return json_file
 
 def print_summary(results):
-    """
-    Print summary of extraction
-    """
     if not results:
         print("\n❌ No results to summarize")
         return
@@ -232,61 +238,46 @@ def print_summary(results):
     print(f"{'='*60}")
     print(f"Total sections processed: {len(results)}")
     
-    # Count sections with answers
     with_answers = sum(1 for r in results if r['student_answer'].strip())
     empty_answers = len(results) - with_answers
     
-    print(f"\n✍️  Sections with student answers: {with_answers}")
+    print(f"\n✍️  Sections with handwritten answers: {with_answers}")
     print(f"📄 Sections without answers: {empty_answers}")
     
-    # Print sample answers
-    print(f"\n📝 SAMPLE STUDENT ANSWERS:")
-    print("-"*60)
-    for r in results[:3]:
-        if r['student_answer'].strip():
-            print(f"\nSection {r['section_number']}:")
-            print(f"Answer: {r['student_answer'][:200]}")
-            if len(r['student_answer']) > 200:
-                print("...")
+    if with_answers > 0:
+        print(f"\n📝 SAMPLE ANSWERS (first 3):")
+        print("-"*60)
+        sample_count = 0
+        for r in results:
+            if r['student_answer'].strip() and sample_count < 3:
+                print(f"\nSection {r['section_number']}:")
+                print(f"Answer: {r['student_answer'][:200]}")
+                sample_count += 1
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    """
-    Main execution - Extract student answers from التعليمة only
-    """
-    # ============================================
-    # CONFIGURE THESE
-    # ============================================
-    
-    INPUT_FOLDER = "Exams/google_vision/math/splited images into sections/exam_1"
-    OUTPUT_FOLDER = "Exams/extraction_results"
-    
-    # ============================================
-    # RUN EXTRACTION
-    # ============================================
-    
-    print("🚀 Student Answer Extractor")
-    print("🎯 Mode: Extract student answers from التعليمة (ignore السند)")
+    print("🚀 Student Handwritten Answer Extractor")
+    print("🎯 Mode: Extract ONLY student's answer from التعليمة")
+    print("🎯 Ignores: Printed instructions (أَحْسُبُ, أَكْمِلُ, لِمَاذَا, etc.)")
+    print("🎯 Note: Processing ONLY first page of each image")
+    print("🎯 Fix: Duplicate images removed automatically")
     print("="*60)
     
-    # Check input folder
+    INPUT_FOLDER = "Exams/sections/sc"
+    OUTPUT_FOLDER = "Exams/extraction_results"
+    
     if not Path(INPUT_FOLDER).exists():
         print(f"❌ Input folder not found: {INPUT_FOLDER}")
         return
     
-    # Process all sections
     results = process_all_sections(INPUT_FOLDER)
     
     if results:
-        # Save results
         save_results(results, INPUT_FOLDER, OUTPUT_FOLDER)
-        
-        # Print summary
         print_summary(results)
-        
         print(f"\n✅ Extraction complete!")
     else:
         print("\n❌ No results extracted")

@@ -10,7 +10,6 @@ from mistralai.client import Mistral
 # CONFIGURATION
 # ============================================
 
-# Get API key from environment
 api_key = os.environ["MISTRAL_API_KEY"]
 client = Mistral(api_key=api_key)
 
@@ -18,7 +17,7 @@ client = Mistral(api_key=api_key)
 INPUT_FOLDER = "Exams/google_vision/math/splited images into sections/exam_1"
 OUTPUT_FOLDER = "Exams/extraction_results"
 
-# Create output folder if it doesn't exist
+# Create output folder
 Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 
 # ============================================
@@ -26,7 +25,7 @@ Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
 # ============================================
 
 def extract_section_number(filename):
-    """Extract section number from filename (e.g., 'image_1.png' -> '1')"""
+    """Extract section number from filename"""
     numbers = re.findall(r'\d+', filename)
     if numbers:
         return numbers[0]
@@ -37,111 +36,104 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def extract_text_from_image(image_path):
-    """Use Mistral OCR to extract text from image"""
-    encoded_string = encode_image(image_path)
-    
-    ocr_response = client.ocr.process(
-        model="mistral-ocr-latest",
-        document={
-            "type": "image_url",
-            "image_url": f"data:image/jpeg;base64,{encoded_string}"
-        },
-        include_image_base64=True
-    )
-    
-    # Combine all pages (usually 1 for section images)
-    full_text = ""
-    for page in ocr_response.pages:
-        full_text += page.markdown + "\n"
-    
-    return full_text.strip()
-
-def extract_structured_content(image_path, custom_prompt=""):
+def extract_student_answer(image_path):
     """
-    Extract structured content using OCR + LLM
-    Returns JSON with question, type, options, etc.
+    Extract ONLY the student's answer from the تعليمة section
+    Ignore السند (general question)
     """
     try:
-        # Step 1: Get raw text from OCR
-        print("  📝 OCR in progress...")
-        raw_text = extract_text_from_image(image_path)
+        # Encode image
+        encoded_string = encode_image(image_path)
         
-        if not raw_text:
-            print("  ⚠️ No text extracted")
-            return None
+        # OCR to get all text with layout
+        ocr_response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "image_url",
+                "image_url": f"data:image/jpeg;base64,{encoded_string}"
+            },
+            include_image_base64=True
+        )
         
-        print(f"  📄 Extracted {len(raw_text)} characters")
+        # Get raw text with structure
+        raw_text = ""
+        for page in ocr_response.pages:
+            raw_text += page.markdown + "\n"
         
-        # Step 2: Use LLM to structure the content
-        system_prompt = """You are an expert in Arabic exam content extraction.
-Return ONLY valid JSON with no additional text."""
+        if not raw_text.strip():
+            return {
+                "student_answer": "",
+                "note": "No text detected"
+            }
+        
+        # Extract using LLM - only the student's answer section
+        system_prompt = """You extract student answers from exam images.
+
+In Arabic exam papers:
+- السند = The question text (what is being asked)
+- التعليمة = The student's answer area
+
+Your task: Extract ONLY the student's answer from the تعليمة section.
+Ignore السند completely."""
 
         user_prompt = f"""
-Extract structured information from this exam question:
+From this exam image, extract ONLY the student's handwritten answer:
 
---- TEXT ---
+--- FULL IMAGE TEXT ---
 {raw_text}
---- END TEXT ---
+--- END ---
 
-Return a JSON object with these exact fields:
-{{
-    "question_text": "the main question text",
-    "answer_type": "multiple_choice" or "essay" or "true_false" or "fill_blank",
-    "options": ["option 1", "option 2", ...] (empty list if not multiple choice),
-    "difficulty": "easy" or "medium" or "hard",
-    "confidence_score": 0.95 (number between 0 and 1)
-}}
+Rules:
+1. Identify which part is السند (question) and which part is التعليمة (student answer)
+2. Extract ONLY the student's answer from التعليمة area
+3. Do NOT include the question text
+4. If multiple answers exist, combine them
+5. If no student answer is found, return empty string
+6. Return ONLY the student's answer text, no explanations
 
-{custom_prompt}
+Student's Answer:
 """
 
-        # Call Mistral LLM to structure the content
         chat_response = client.chat.complete(
             model="mistral-large-latest",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1  # Low temperature for consistent output
+            temperature=0.1
         )
         
-        # Parse the JSON response
-        response_text = chat_response.choices[0].message.content.strip()
+        student_answer = chat_response.choices[0].message.content.strip()
         
-        # Clean markdown code blocks if present
-        if response_text.startswith('```json'):
-            response_text = response_text[7:]
-        if response_text.startswith('```'):
-            response_text = response_text[3:]
-        if response_text.endswith('```'):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
-        
-        # Parse JSON
-        extracted = json.loads(response_text)
-        
-        return extracted
+        return {
+            "student_answer": student_answer,
+            "full_ocr_text": raw_text[:300]  # Keep for reference
+        }
         
     except Exception as e:
-        print(f"  ❌ Error: {e}")
-        return None
+        return {
+            "student_answer": "",
+            "error": str(e)
+        }
 
 # ============================================
-# MAIN PROCESSING FUNCTION
+# BATCH PROCESSING
 # ============================================
 
-def process_folder(folder_path, custom_prompt="", file_extensions=['.png', '.jpg', '.jpeg']):
+def process_all_sections(folder_path):
     """
-    Process all images in a folder and extract content
+    Process all section images and extract student answers only
     """
     folder = Path(folder_path)
     
     # Get all images
     images = []
-    for ext in file_extensions:
+    for ext in ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']:
         images.extend(folder.glob(f"*{ext}"))
-        images.extend(folder.glob(f"*{ext.upper()}"))
+    
+    if not images:
+        print(f"❌ No images found in {folder_path}")
+        return []
     
     # Sort by section number
     images.sort(key=lambda x: extract_section_number(x.name))
@@ -156,26 +148,23 @@ def process_folder(folder_path, custom_prompt="", file_extensions=['.png', '.jpg
     for idx, image_path in enumerate(images, 1):
         section_num = extract_section_number(image_path.name)
         print(f"[{idx}/{len(images)}] Section {section_num}: {image_path.name}")
+        print(f"  🔍 Extracting student answer from التعليمة...")
         
-        # Extract content
-        extracted = extract_structured_content(str(image_path), custom_prompt)
+        # Extract student answer only
+        extracted = extract_student_answer(str(image_path))
         
-        if extracted:
-            result = {
-                "section_number": section_num,
-                "filename": image_path.name,
-                "question_text": extracted.get("question_text", ""),
-                "answer_type": extracted.get("answer_type", "unknown"),
-                "options": extracted.get("options", []),
-                "difficulty": extracted.get("difficulty", "medium"),
-                "confidence_score": extracted.get("confidence_score", 0.5)
-            }
-            results.append(result)
-            print(f"  ✅ Question: {result['question_text'][:60]}...")
-            print(f"  ✅ Confidence: {result['confidence_score']:.0%}")
-        else:
-            print(f"  ❌ Failed to extract")
+        result = {
+            "section_number": section_num,
+            "filename": image_path.name,
+            "student_answer": extracted.get("student_answer", ""),
+            "error": extracted.get("error", None)
+        }
         
+        results.append(result)
+        
+        # Print preview
+        answer_preview = result["student_answer"][:100] if result["student_answer"] else "[No student answer detected]"
+        print(f"  ✍️  Student answer: {answer_preview}...")
         print()
     
     return results
@@ -186,126 +175,110 @@ def process_folder(folder_path, custom_prompt="", file_extensions=['.png', '.jpg
 
 def save_results(results, folder_path, output_folder):
     """
-    Save extraction results to JSON file
+    Save extracted student answers to JSON
     """
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
-    # Prepare output data
+    # Prepare output
     output_data = {
         "metadata": {
             "source_folder": folder_path,
             "total_sections": len(results),
             "extraction_date": datetime.now().isoformat(),
-            "timestamp": timestamp
+            "extraction_type": "student_answers_from_talima"
         },
         "results": results
     }
     
     # Save JSON
-    json_file = Path(output_folder) / f"extraction_results_{timestamp}.json"
+    json_file = Path(output_folder) / f"student_answers_{timestamp}.json"
     with open(json_file, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
     
-    print(f"\n💾 Results saved to: {json_file}")
+    print(f"\n💾 JSON saved to: {json_file}")
     
-    # Also save a summary CSV for easy viewing
-    try:
-        import pandas as pd
-        df = pd.DataFrame(results)
-        csv_file = Path(output_folder) / f"extraction_results_{timestamp}.csv"
-        df.to_csv(csv_file, index=False, encoding='utf-8-sig')
-        print(f"💾 CSV saved to: {csv_file}")
-    except ImportError:
-        print("💡 Install pandas for CSV export: pip install pandas")
+    # Save simple text file
+    txt_file = Path(output_folder) / f"student_answers_{timestamp}.txt"
+    with open(txt_file, 'w', encoding='utf-8') as f:
+        f.write("="*60 + "\n")
+        f.write("STUDENT ANSWERS FROM التعليمة\n")
+        f.write(f"Date: {datetime.now().isoformat()}\n")
+        f.write("="*60 + "\n\n")
+        
+        for result in results:
+            f.write(f"Section {result['section_number']}:\n")
+            f.write(f"File: {result['filename']}\n")
+            f.write("-"*40 + "\n")
+            if result['student_answer']:
+                f.write(result['student_answer'] + "\n")
+            else:
+                f.write("[No student answer detected]\n")
+            f.write("\n" + "="*60 + "\n\n")
+    
+    print(f"💾 Text file saved to: {txt_file}")
     
     return json_file
 
 def print_summary(results):
     """
-    Print summary statistics
+    Print summary of extraction
     """
     if not results:
         print("\n❌ No results to summarize")
         return
     
     print(f"\n{'='*60}")
-    print("📊 EXTRACTION SUMMARY")
+    print("📊 STUDENT ANSWERS SUMMARY")
     print(f"{'='*60}")
     print(f"Total sections processed: {len(results)}")
     
-    # Count by type
-    types = {}
-    difficulties = {}
-    total_confidence = 0
+    # Count sections with answers
+    with_answers = sum(1 for r in results if r['student_answer'].strip())
+    empty_answers = len(results) - with_answers
     
-    for r in results:
-        types[r['answer_type']] = types.get(r['answer_type'], 0) + 1
-        difficulties[r['difficulty']] = difficulties.get(r['difficulty'], 0) + 1
-        total_confidence += r['confidence_score']
+    print(f"\n✍️  Sections with student answers: {with_answers}")
+    print(f"📄 Sections without answers: {empty_answers}")
     
-    avg_confidence = total_confidence / len(results) if results else 0
-    
-    print(f"\n📋 Question Types:")
-    for t, count in types.items():
-        print(f"  {t}: {count}")
-    
-    print(f"\n🎯 Difficulty Levels:")
-    for d, count in difficulties.items():
-        print(f"  {d}: {count}")
-    
-    print(f"\n✨ Average Confidence: {avg_confidence:.1%}")
-    
-    print(f"\n📝 Sample Results (first 3):")
+    # Print sample answers
+    print(f"\n📝 SAMPLE STUDENT ANSWERS:")
     print("-"*60)
     for r in results[:3]:
-        print(f"\nSection {r['section_number']}:")
-        print(f"  Question: {r['question_text'][:80]}...")
-        print(f"  Type: {r['answer_type']}")
-        print(f"  Confidence: {r['confidence_score']:.0%}")
+        if r['student_answer'].strip():
+            print(f"\nSection {r['section_number']}:")
+            print(f"Answer: {r['student_answer'][:200]}")
+            if len(r['student_answer']) > 200:
+                print("...")
 
 # ============================================
-# MAIN EXECUTION
+# MAIN
 # ============================================
 
 def main():
     """
-    Main execution function
+    Main execution - Extract student answers from التعليمة only
     """
     # ============================================
-    # CONFIGURE THESE BEFORE RUNNING
+    # CONFIGURE THESE
     # ============================================
     
-    # Path to folder containing section images
     INPUT_FOLDER = "Exams/google_vision/math/splited images into sections/exam_1"
-    
-    # Output folder for results (defaults to same folder if not specified)
     OUTPUT_FOLDER = "Exams/extraction_results"
-    
-    # Optional: Add custom prompt for specific extraction rules
-    CUSTOM_PROMPT = """
-    Important rules:
-    - Questions are in Arabic language
-    - For multiple choice, extract all options labeled أ, ب, ج, د
-    - If the question has sub-parts (a, b, c), note them in the question_text
-    - For essay questions, set answer_type as "essay"
-    - If handwriting is unclear, lower confidence_score accordingly
-    """
     
     # ============================================
     # RUN EXTRACTION
     # ============================================
     
-    print("🚀 Arabic Exam Content Extractor")
+    print("🚀 Student Answer Extractor")
+    print("🎯 Mode: Extract student answers from التعليمة (ignore السند)")
     print("="*60)
     
-    # Check if input folder exists
+    # Check input folder
     if not Path(INPUT_FOLDER).exists():
         print(f"❌ Input folder not found: {INPUT_FOLDER}")
-        print("Please update INPUT_FOLDER path")
         return
     
-    # Process all images
-    results = process_folder(INPUT_FOLDER, CUSTOM_PROMPT)
+    # Process all sections
+    results = process_all_sections(INPUT_FOLDER)
     
     if results:
         # Save results
@@ -316,11 +289,7 @@ def main():
         
         print(f"\n✅ Extraction complete!")
     else:
-        print("\n❌ No results extracted. Check your images and try again.")
-
-# ============================================
-# RUN THE SCRIPT
-# ============================================
+        print("\n❌ No results extracted")
 
 if __name__ == "__main__":
     main()

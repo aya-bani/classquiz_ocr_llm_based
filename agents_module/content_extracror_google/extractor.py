@@ -107,20 +107,22 @@ class ArabicHandwrittenExtractor:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Serialize results
-        def result_to_dict(result):
-            d = result.__dict__.copy()
-            # Convert OcrBlock objects to dicts
-            d["blocks"] = [b.__dict__ for b in getattr(result, "blocks", [])]
-            return d
+        def result_to_dict(result, idx):
+            return {
+                "section_number": idx + 1,
+                "question_type": section_type if section_type else "UNKNOWN",
+                "question": question_text if question_text else "",
+                "options": None,
+                "student_answer": result.student_answer,
+                "metadata": None,
+                "confidence": round(result.confidence, 4),
+            }
 
-        payload = {
-            "total": len(results),
-            "answered": sum(1 for r in results if r.student_answer),
-            "empty": sum(1 for r in results if not r.student_answer),
-            "results": [result_to_dict(r) for r in results],
-        }
+        # Only include results with a non-empty student_answer (handwritten detected)
+        filtered_results = [r for r in results if r.student_answer and r.student_answer.strip()]
+        output_list = [result_to_dict(r, i) for i, r in enumerate(filtered_results)]
         try:
-            out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            out_path.write_text(json.dumps(output_list, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"[INFO] Results saved → {out_path}")
         except Exception as e:
             print(f"[ERROR] Failed to write output file: {e}")
@@ -132,7 +134,6 @@ class ArabicHandwrittenExtractor:
         self._vision_client = _build_vision_client()
 
     def extract_image(self, image_path: str | Path) -> ExtractionResult:
-
         path = Path(image_path)
         result = ExtractionResult()
 
@@ -145,17 +146,38 @@ class ArabicHandwrittenExtractor:
         blocks = filter_by_confidence(blocks, self.min_block_confidence)
         blocks = [b for b in blocks if is_handwritten_candidate(b.text, b.confidence)]
 
-        if not blocks:
-            cleaned = remove_placeholders(clean_arabic_text(raw_text))
-            if cleaned and not is_placeholder_only(cleaned):
-                result.student_answer = cleaned
-                result.confidence = 0.4
-            return result
-
+        # Always use LLM post-processing to extract only handwritten answer
         assembled = remove_placeholders(clean_arabic_text(assemble_text_rtl(blocks)))
+        llm_answer = ""
+        try:
+            from .prompt import build_user_prompt, SYSTEM_PROMPT
+            import openai
+            # Use OpenAI API key from env
+            openai.api_key = os.getenv("OPENAI_API_KEY")
+            user_prompt = build_user_prompt(
+                raw_ocr_text=assembled or raw_text,
+                section_type="unknown",
+                question_text="",
+                avg_confidence=sum(b.confidence for b in blocks) / len(blocks) if blocks else 0.0,
+                has_dotted_line=False,
+            )
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                max_tokens=300,
+            )
+            llm_answer = (response["choices"][0]["message"]["content"] or "").strip()
+        except Exception as e:
+            if self.verbose:
+                print(f"[LLM ERROR] {e}")
+            llm_answer = assembled
 
-        result.student_answer = assembled
-        result.confidence = sum(b.confidence for b in blocks) / len(blocks)
+        result.student_answer = llm_answer
+        result.confidence = sum(b.confidence for b in blocks) / len(blocks) if blocks else 0.0
         result.blocks = blocks
 
         if self.verbose:

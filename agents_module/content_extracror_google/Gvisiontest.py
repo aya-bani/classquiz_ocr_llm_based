@@ -46,7 +46,7 @@ INPUT_FOLDER = "Exams/google_vision/math/splited images into sections/exam_1"
 # Where to save the output JSON.
 # Set to None to use the default:
 #   agents_module/content_extractor/results/<folder_name>.json
-OUTPUT_PATH = "agents_module/content_extractor/results/exam_1.json"
+OUTPUT_PATH = None
 
 # Google Cloud credentials are configured in extractor.py (GOOGLE_CREDENTIALS_PATH).
 # Edit that variable there — no credential config needed here.

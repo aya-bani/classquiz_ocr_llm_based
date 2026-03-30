@@ -2,12 +2,13 @@ import os
 import sys
 import json
 from google import genai
+from google.genai import types  # ✅ FIX: needed for Part.from_bytes
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
+client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
 
 OCR_PROMPT = """
 You are a STRICT multilingual OCR engine.
@@ -31,19 +32,31 @@ CONF_THRESHOLD = 0.75
 
 # ---------------- OCR ---------------- #
 def run_ocr(file_path):
-    # Upload the file to Gemini
-    print(f"📤 Uploading {file_path}...")
-    uploaded_file = client.files.upload(file=file_path)
-    
-    print(f"✅ File uploaded: {uploaded_file.name}")
-    
-    # Use the uploaded file URI
+    print(f"📤 Processing {file_path}...")  
+
+    # ❌ OLD:
+    # uploaded_file = client.files.upload(file=file_path)
+    # print(f"✅ File uploaded: {uploaded_file.name}")
+
+    # ✅ FIX: read file as bytes (Vertex AI method)
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    image_part = types.Part.from_bytes(
+        data=file_bytes,
+        mime_type="image/jpeg",  # ⚠️ change if png/pdf
+    )
+
+    # ❌ OLD:
+    # contents=[OCR_PROMPT, uploaded_file]
+
     response = client.models.generate_content(
-        model="gemini-3-pro-preview",
-        contents=[OCR_PROMPT, uploaded_file]
+        model="gemini-3.1-pro-preview",  
+        contents=[OCR_PROMPT, image_part]  
     )
 
     return response.text
+
 
 
 # ---------------- CLEANING ---------------- #
@@ -65,7 +78,8 @@ def clean_ocr(ocr_json):
 
 
 # ---------------- MAIN ---------------- #
-if __name__ == "__main__":
+
+if __name__ == "__main__": 
 
     if len(sys.argv) < 2:
         print("Usage: python ocr.py <file_path>")

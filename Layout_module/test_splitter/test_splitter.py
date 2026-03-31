@@ -9,7 +9,7 @@ import shutil
 def main():
     # input image from the Exams folder
     project_root = Path(__file__).resolve().parents[2]
-    img_file = project_root / "Exams" / "croped_corrections" / "examen sc_cropped.jpg"
+    img_file = project_root / "Exams" / "croped_corrections" / "exam_pdf_cropped.jpg"
     if not img_file.exists():
         raise FileNotFoundError(f"Expected test image not found: {img_file}")
 

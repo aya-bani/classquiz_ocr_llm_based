@@ -54,6 +54,7 @@ CLASSIFICATION_PROMPT = """
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
     QUESTION TYPES (choose exactly ONE):
 
     1. ENONCE
@@ -116,7 +117,72 @@ CLASSIFICATION_PROMPT = """
         • "Label the diagram", "Identify parts", "Analyze the graph"
         • Visual component is central to the question
 
-    11. UNKNOWN
+    11. CHRONOLOGICAL_ORDERING
+        • Arranging events, locations, or items in sequence
+        • "Arrange in order", "Put in sequence", "Order from first to last"
+        • May include numbers 1, 2, 3 to indicate sequence
+        • Often asks to order based on appearance or time
+
+    12. CHARACTER_CLASSIFICATION
+        • Identifying and categorizing characters or items
+        • "Classify as human/animal", "Categorize into groups"
+        • May involve sorting into predefined categories
+        • Often presented with a table or two-column format
+
+    13. TEXTUAL_EVIDENCE
+        • Supporting an answer with a direct quote or proof from the text
+        • "Justify with evidence", "Support from the text", "Quote from..."
+        • Requires extracting specific text to prove a point
+        • Often paired with justification questions
+
+    14. VOCABULARY_IN_CONTEXT
+        • Finding synonyms or antonyms within a text
+        • "Find synonym of...", "Find antonym of..."
+        • May ask to replace words or define based on context
+        • Focuses on word meaning within the passage
+
+    15. OPINION_COMPARISON
+        • Expressing personal viewpoint or drawing comparisons
+        • "What do you think?", "Compare to real-world", "Give your opinion"
+        • May ask for advice or recommendations
+        • Subjective response requiring reasoning
+
+    16. QUESTION_FORMULATION
+        • Creating a mathematical or logical question from a scenario
+        • "Formulate an appropriate question", "Write a question about..."
+        • Requires understanding of given data to create a new problem
+        • Often followed by answering the formulated question
+
+    17. ERROR_CORRECTION
+        • Identifying and correcting false statements
+        • "Correct the error", "Fix the mistake", "What is wrong?"
+        • May involve grammar, science facts, or mathematical errors
+        • Requires both detection and correction
+
+    18. CAUSAL_EXPLANATION
+        • Explaining why a phenomenon occurs
+        • "Explain why...", "Why did this happen?", "Reason for..."
+        • Requires understanding of cause-and-effect relationships
+        • Scientific or logical reasoning
+
+    19. LINGUISTIC_IDENTIFICATION
+        • Finding specific grammatical structures in text
+        • "Find a verb in present tense", "Identify active participle"
+        • Requires recognition of grammatical forms
+
+    20. CONJUGATION_TRANSFORMATION
+        • Rewriting sentences with different pronouns or tenses
+        • "Conjugate in imperative form", "Rewrite with pronoun change"
+        • Requires transforming grammatical structures
+        • May involve verb conjugation or sentence restructuring
+
+    21. DERIVATION
+        • Forming active or passive participles from root verbs
+        • "Complete with active participle", "Form the passive participle"
+        • Requires understanding of verb morphology
+        • Focuses on word formation from roots
+
+    22. UNKNOWN
         • Cannot reliably determine the type
         • Image quality too poor
         • Question format unclear or unusual

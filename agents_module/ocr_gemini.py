@@ -2,7 +2,7 @@ import os
 import sys
 import json
 from google import genai
-from google.genai import types  # ✅ FIX: needed for Part.from_bytes
+from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,21 +34,13 @@ CONF_THRESHOLD = 0.75
 def run_ocr(file_path):
     print(f"📤 Processing {file_path}...")  
 
-    # ❌ OLD:
-    # uploaded_file = client.files.upload(file=file_path)
-    # print(f"✅ File uploaded: {uploaded_file.name}")
-
-    # ✅ FIX: read file as bytes (Vertex AI method)
     with open(file_path, "rb") as f:
         file_bytes = f.read()
 
     image_part = types.Part.from_bytes(
         data=file_bytes,
-        mime_type="image/jpeg",  # ⚠️ change if png/pdf
+        mime_type="image/jpeg",
     )
-
-    # ❌ OLD:
-    # contents=[OCR_PROMPT, uploaded_file]
 
     response = client.models.generate_content(
         model="gemini-3.1-pro-preview",  
@@ -56,7 +48,6 @@ def run_ocr(file_path):
     )
 
     return response.text
-
 
 
 # ---------------- CLEANING ---------------- #
@@ -78,33 +69,85 @@ def clean_ocr(ocr_json):
 
 
 # ---------------- MAIN ---------------- #
+import re
+from pathlib import Path
 
-if __name__ == "__main__": 
 
+def get_section_number(filename):
+    match = re.search(r'section_(\d+)', filename)
+    return int(match.group(1)) if match else 0
+
+
+if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python ocr.py <file_path>")
+        print("Usage: python ocr_gemini.py <folder_path>")
         sys.exit(1)
 
-    file_path = sys.argv[1]
+    folder_path = sys.argv[1]
 
-    print("🔍 Running OCR...")
+    image_files = []
+    for ext in ("*.jpg", "*.png", "*.jpeg"):
+        image_files.extend([str(p) for p in Path(folder_path).glob(ext)])
 
-    raw = run_ocr(file_path)
+    image_files = sorted(image_files, key=get_section_number)
 
-    # Convert Gemini text → JSON
-    try:
-        ocr_json = json.loads(raw)
-    except json.JSONDecodeError:
-        print("❌ Gemini did not return valid JSON:")
-        print(raw)
-        sys.exit(1)
+    results = []
 
-    clean_text, hallucinated, total = clean_ocr(ocr_json)
+    for img_path in image_files:
+        ext = os.path.splitext(img_path)[1].lower()
+        mime_type = "image/png" if ext == ".png" else "image/jpeg"
 
-    print("\n📝 Extracted Text:\n")
-    print(clean_text)
+        def run_ocr_with_mime(file_path, mime_type):
+            print(f"📤 Processing {file_path}...")
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
 
-    print("\n📊 Stats:")
-    print(f"Total words: {total}")
-    print(f"Hallucinated words: {hallucinated}")
-    print(f"Hallucination rate: {hallucinated/total:.2%}")
+            image_part = types.Part.from_bytes(
+                data=file_bytes,
+                mime_type=mime_type,
+            )
+
+            response = client.models.generate_content(
+                model="gemini-3.1-pro-preview",
+                contents=[OCR_PROMPT, image_part]
+            )
+            return response.text
+
+        raw = run_ocr_with_mime(img_path, mime_type)
+
+        try:
+            data = json.loads(raw)
+            confidence = data.get("confidence", None)
+            content = data.get("content", data)
+        except Exception:
+            print(f"❌ Could not parse JSON for {img_path}:")
+            print(raw)
+            continue
+
+        section_num = get_section_number(img_path)
+
+        results.append({
+            "section": section_num,
+            "file": os.path.basename(img_path),
+            "content": content,
+            "confidence": confidence
+        })
+
+    results.sort(key=lambda x: x["section"])
+
+    print("\n===== Extraction Results by Section =====\n")
+    for r in results:
+        print(f"Section {r['section']} ({r['file']}):")
+        print(f"  Content: {r['content']}")
+        print(f"  Confidence: {r['confidence']}")
+        print()
+
+    # ================= SAVE TXT ONLY ================= #
+    txt_path = os.path.join(folder_path, "extraction_results.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(f"Section {r['section']} ({r['file']}):\n")
+            f.write(f"Content: {r['content']}\n")
+            f.write(f"Confidence: {r['confidence']}\n\n")
+
+    print(f"\n✅ TXT file saved: {txt_path}")

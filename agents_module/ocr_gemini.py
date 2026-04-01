@@ -11,20 +11,19 @@ GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
 client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
 
 OCR_PROMPT = """
-You are a STRICT multilingual OCR engine.
+You are a STRICT multilingual OCR engine specialized in extracting handwritten answers from exam images.
 
-The document may contain:
-- Arabic
-- French
-- English
-- Numbers
-
-Rules:
-- Keep the original language
-- Do NOT translate
-- Do NOT guess
+Instructions:
+- Your primary task is to extract ONLY the handwritten answers provided by the student. These answers must be the most important and clearly highlighted in your output.
+- Ignore printed text, question headers, and instructions unless they are necessary to understand the handwritten answer.
+- Adapt your extraction method based on the question type:
+    - For short answer questions, extract the handwritten response as clearly as possible.
+    - For 'ارسم' (draw) or graph-based questions, indicate the presence of a drawing or graph and describe any handwritten annotations or labels.
+    - For multiple-choice or checkbox questions, extract the handwritten marks or selected options.
+- Keep the original language (Arabic, French, English, Numbers).
+- Do NOT translate or guess missing content.
 - Unreadable → [UNK]
-- Return ONLY the extracted text, nothing else
+- Return ONLY the extracted handwritten answers, nothing else. Highlight them clearly in your output.
 """
 
 CONF_THRESHOLD = 0.75

@@ -1,4 +1,24 @@
+
 from __future__ import annotations
+# === CLI for batch classification ===
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Batch classify section images and output question type & confidence.")
+    parser.add_argument("folder", type=str, help="Folder path containing section images")
+    parser.add_argument("--is_submission", action="store_true", help="Set if images are student submissions (default: correction mode)")
+    args = parser.parse_args()
+
+    folder_path = Path(args.folder)
+    is_submission = args.is_submission
+
+    with QuestionExtractorGoogleCloud() as extractor:
+        results = extractor.process_exam(folder_path, is_submission=is_submission)
+    print("\n===== Classification Results =====\n")
+    for r in results:
+        image_name = r.get("meta_data", {}).get("image_name", "?")
+        qtype = r.get("question_type", "UNKNOWN")
+        conf = r.get("confidence", 0)
+        print(f"{image_name}: {qtype} (confidence: {conf})")
 
 import io
 import json

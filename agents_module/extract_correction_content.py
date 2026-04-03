@@ -16,10 +16,10 @@ You are a STRICT multilingual OCR and content extraction engine specialized in e
 
 Instructions:
 - Extract the following fields from the image:
-	- question: The full text of the question as it appears.
-	- corrected_answer: The full corrected answer as written by the teacher or correction.
-	- subject: The subject of the exam (e.g., Math, Science, etc.).
-	- level: The level or grade (e.g., 2eme, 3ème année, etc.).
+    - question: The full text of the question as it appears.
+    - corrected_answer: The full corrected answer as written by the teacher or correction. If the answer is a drawing, diagram, or visual (such as a clock, graph, or sketch), describe in detail what is drawn, including positions, labels, and any handwritten annotations. For visual answers (drawings, diagrams, clocks, etc.), provide a detailed description of the drawing and any relevant features, similar to: "Handwritten blue clock hands drawn inside the left circle. The short hand points to approximately the 10 o'clock position and the long hand points to the 1 o'clock position."
+    - subject: The subject of the exam (e.g., Math, Science, etc.).
+    - level: The level or grade (e.g., 2eme, 3ème année, etc.).
 - Ignore any irrelevant printed text, page numbers, or unrelated marks.
 - Keep the original language (Arabic, French, English, Numbers).
 - If a field is missing or unreadable, set its value to [UNK].
@@ -74,6 +74,12 @@ if __name__ == "__main__":
 	image_path = sys.argv[1]
 	result = extract_correction_content(image_path)
 	out_path = os.path.splitext(image_path)[0] + "_correction_content.json"
+	import shutil
+	output_dir = os.path.join("Exams", "content_correction_jsons")
+	os.makedirs(output_dir, exist_ok=True)
+	base_name = os.path.splitext(os.path.basename(image_path))[0]
+	out_path = os.path.join(output_dir, base_name + "_correction_content.json")
+
 	if result:
 		print("\n===== Extracted Correction Content =====\n")
 		print(json.dumps(result, indent=2, ensure_ascii=False))

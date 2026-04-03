@@ -92,6 +92,11 @@ if __name__ == "__main__":
 
     results = []
 
+
+    # Prepare output directory for JSONs
+    output_dir = os.path.join("Exams", "content_extraction_jsons")
+    os.makedirs(output_dir, exist_ok=True)
+
     for img_path in image_files:
         ext = os.path.splitext(img_path)[1].lower()
         mime_type = "image/png" if ext == ".png" else "image/jpeg"
@@ -114,13 +119,29 @@ if __name__ == "__main__":
 
         raw = run_ocr_with_mime(img_path, mime_type)
 
+        # Try to parse as JSON, else save raw output for debugging
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        out_json_path = os.path.join(output_dir, base_name + "_ocr_content.json")
+        out_txt_path = os.path.join(output_dir, base_name + "_ocr_content_raw.txt")
+
         try:
             data = json.loads(raw)
             confidence = data.get("confidence", None)
             content = data.get("content", data)
+            # Save as JSON
+            with open(out_json_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "section": get_section_number(img_path),
+                    "file": os.path.basename(img_path),
+                    "content": content,
+                    "confidence": confidence
+                }, f, indent=2, ensure_ascii=False)
         except Exception:
             print(f"❌ Could not parse JSON for {img_path}:")
             print(raw)
+            # Save raw output for debugging
+            with open(out_txt_path, "w", encoding="utf-8") as f:
+                f.write(raw)
             continue
 
         section_num = get_section_number(img_path)

@@ -27,7 +27,7 @@ def test_add_markers_to_exams():
     marker_gen = MarkerGenerator()
     
     # Base exam directory
-    base_exam_dir = Path("Exams") / "3ème année"
+    base_exam_dir = Path("Exams") / "2eme" 
     
     if not base_exam_dir.exists():
         logger.error(f"Exam directory not found: {base_exam_dir}")

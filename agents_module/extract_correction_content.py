@@ -90,7 +90,25 @@ if __name__ == "__main__":
 		print(f"❌ No supported image files found in: {input_path}")
 		sys.exit(1)
 
-	for image_path in image_paths:
+	if os.path.isdir(input_path):
+		results = []
+		for image_path in image_paths:
+			result = extract_correction_content(image_path)
+			if result:
+				results.append({
+					"image": os.path.basename(image_path),
+					"content": result,
+				})
+			else:
+				print(f"\n❌ JSON file not created for {image_path}. See raw output for details.")
+
+		folder_name = os.path.basename(os.path.normpath(input_path))
+		out_path = os.path.join(output_dir, folder_name + "_correction_content.json")
+		with open(out_path, "w", encoding="utf-8") as f:
+			json.dump(results, f, indent=2, ensure_ascii=False)
+		print(f"\n✅ Combined JSON file saved: {out_path}")
+	else:
+		image_path = image_paths[0]
 		result = extract_correction_content(image_path)
 		base_name = os.path.splitext(os.path.basename(image_path))[0]
 		out_path = os.path.join(output_dir, base_name + "_correction_content.json")

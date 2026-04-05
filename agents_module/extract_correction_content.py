@@ -66,25 +66,40 @@ def extract_correction_content(image_path):
 
 	return data
 
+
+def iter_image_paths(input_path):
+	if os.path.isdir(input_path):
+		for name in sorted(os.listdir(input_path)):
+			path = os.path.join(input_path, name)
+			if os.path.isfile(path) and os.path.splitext(name)[1].lower() in {".png", ".jpg", ".jpeg"}:
+				yield path
+	else:
+		yield input_path
+
 if __name__ == "__main__":
 	if len(sys.argv) < 2:
-		print("Usage: python extract_correction_content.py <image_path>")
+		print("Usage: python extract_correction_content.py <image_path_or_folder>")
 		sys.exit(1)
 
-	image_path = sys.argv[1]
-	result = extract_correction_content(image_path)
-	out_path = os.path.splitext(image_path)[0] + "_correction_content.json"
-	import shutil
 	output_dir = os.path.join("Exams", "content_correction_jsons")
 	os.makedirs(output_dir, exist_ok=True)
-	base_name = os.path.splitext(os.path.basename(image_path))[0]
-	out_path = os.path.join(output_dir, base_name + "_correction_content.json")
+	input_path = sys.argv[1]
+	image_paths = list(iter_image_paths(input_path))
 
-	if result:
-		print("\n===== Extracted Correction Content =====\n")
-		print(json.dumps(result, indent=2, ensure_ascii=False))
-		with open(out_path, "w", encoding="utf-8") as f:
-			json.dump(result, f, indent=2, ensure_ascii=False)
-		print(f"\n✅ JSON file saved: {out_path}")
-	else:
-		print(f"\n❌ JSON file not created. See raw output for details.")
+	if not image_paths:
+		print(f"❌ No supported image files found in: {input_path}")
+		sys.exit(1)
+
+	for image_path in image_paths:
+		result = extract_correction_content(image_path)
+		base_name = os.path.splitext(os.path.basename(image_path))[0]
+		out_path = os.path.join(output_dir, base_name + "_correction_content.json")
+
+		if result:
+			print("\n===== Extracted Correction Content =====\n")
+			print(json.dumps(result, indent=2, ensure_ascii=False))
+			with open(out_path, "w", encoding="utf-8") as f:
+				json.dump(result, f, indent=2, ensure_ascii=False)
+			print(f"\n✅ JSON file saved: {out_path}")
+		else:
+			print(f"\n❌ JSON file not created for {image_path}. See raw output for details.")

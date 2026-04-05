@@ -118,31 +118,9 @@ if __name__ == "__main__":
             return response.text
 
         raw = run_ocr_with_mime(img_path, mime_type)
+        content = raw.strip() if raw else "[UNK]"
 
-        # Try to parse as JSON, else save raw output for debugging
         base_name = os.path.splitext(os.path.basename(img_path))[0]
-        out_json_path = os.path.join(output_dir, base_name + "_ocr_content.json")
-        out_txt_path = os.path.join(output_dir, base_name + "_ocr_content_raw.txt")
-
-        try:
-            data = json.loads(raw)
-            confidence = data.get("confidence", None)
-            content = data.get("content", data)
-            # Save as JSON
-            with open(out_json_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "section": get_section_number(img_path),
-                    "file": os.path.basename(img_path),
-                    "content": content,
-                    "confidence": confidence
-                }, f, indent=2, ensure_ascii=False)
-        except Exception:
-            print(f"❌ Could not parse JSON for {img_path}:")
-            print(raw)
-            # Save raw output for debugging
-            with open(out_txt_path, "w", encoding="utf-8") as f:
-                f.write(raw)
-            continue
 
         section_num = get_section_number(img_path)
 
@@ -150,7 +128,7 @@ if __name__ == "__main__":
             "section": section_num,
             "file": os.path.basename(img_path),
             "content": content,
-            "confidence": confidence
+            "confidence": None
         })
 
     results.sort(key=lambda x: x["section"])
@@ -162,12 +140,11 @@ if __name__ == "__main__":
         print(f"  Confidence: {r['confidence']}")
         print()
 
-    # ================= SAVE TXT ONLY ================= #
-    txt_path = os.path.join(folder_path, "extraction_results.txt")
-    with open(txt_path, "w", encoding="utf-8") as f:
-        for r in results:
-            f.write(f"Section {r['section']} ({r['file']}):\n")
-            f.write(f"Content: {r['content']}\n")
-            f.write(f"Confidence: {r['confidence']}\n\n")
+    combined_json_path = os.path.join(
+        output_dir,
+        os.path.basename(os.path.normpath(folder_path)) + "_ocr_content.json",
+    )
+    with open(combined_json_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
 
-    print(f"\n✅ TXT file saved: {txt_path}")
+    print(f"\n✅ JSON file saved: {combined_json_path}")

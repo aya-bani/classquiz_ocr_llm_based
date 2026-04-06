@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import re
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -27,8 +28,61 @@ Instructions:
 """
 
 
+def _normalize_arabic_digits(text):
+	if not isinstance(text, str):
+		return text
+	trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+	return text.translate(trans)
+
+
+def _extract_question_number(question_text):
+	if not isinstance(question_text, str):
+		return None
+	norm = _normalize_arabic_digits(question_text)
+	# Examples: تعليمة1, تعليمة 1, تَعْلِيمَة 8
+	match = re.search(r"تعليمة\s*([0-9]+)", norm, re.IGNORECASE)
+	if match:
+		return match.group(1)
+	return None
+
+
+def _to_structured_output(raw_data, image_path):
+	question_text = raw_data.get("question")
+	corrected_answer = raw_data.get("corrected_answer")
+	subject = raw_data.get("subject")
+	question_number = _extract_question_number(question_text)
+
+	if corrected_answer and corrected_answer != "[UNK]":
+		options = [{"id": "A", "text": corrected_answer}]
+	else:
+		options = []
+
+	return {
+		"question_type": "UNKNOWN",
+		"confidence": 0.95,
+		"content": {
+			"content": {
+				"question_number": question_number,
+				"question_text": question_text,
+				"subject": subject,
+				"options": options,
+			},
+			"correct_answer": {
+				"question_number": question_number,
+				"question_text": None,
+				"options": options,
+			},
+			"notes": ["1 point"],
+			"confidence": 0.95,
+		},
+		"meta_data": {
+			"image_path": image_path,
+			"image_name": os.path.basename(image_path),
+		},
+	}
+
+
 def extract_correction_content(image_path):
-	import re
 	print(f"📤 Processing {image_path}...")
 	with open(image_path, "rb") as f:
 		file_bytes = f.read()
@@ -64,7 +118,7 @@ def extract_correction_content(image_path):
 		print(f"Raw output saved to: {out_txt_path}")
 		return None
 
-	return data
+	return _to_structured_output(data, image_path)
 
 
 def iter_image_paths(input_path):
@@ -95,10 +149,7 @@ if __name__ == "__main__":
 		for image_path in image_paths:
 			result = extract_correction_content(image_path)
 			if result:
-				results.append({
-					"image": os.path.basename(image_path),
-					"content": result,
-				})
+				results.append(result)
 			else:
 				print(f"\n❌ JSON file not created for {image_path}. See raw output for details.")
 

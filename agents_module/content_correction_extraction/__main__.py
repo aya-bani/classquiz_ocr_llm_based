@@ -12,11 +12,7 @@ from google import genai
 from google.genai import types
 
 from logger_manager import LoggerManager
-from agents_module.prompts import (
-    BASE_PROMPT_SUBMISSION_EXTRACTION,
-    GENERIC_TEMPLATE_SUBMISSION,
-    TEMPLATES_SUBMISSIONS_PROMPT,
-)
+from agents_module.extract_correction_content import extract_correction_content
 
 try:
     from agents_module.question_extractor_google_cloud import (
@@ -37,7 +33,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY") or os.getenv("GOOGLE_API_KEY")
 client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
 
-_OUTPUT_DIR = Path("Exams") / "content_extraction_jsons"
+_OUTPUT_DIR = Path("Exams") / "content_correction_jsons"
 _SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
@@ -70,7 +66,7 @@ class ContentCorrectionExtraction:
 
         image_paths = self._collect_image_paths(input_path)
         if not image_paths:
-            return {"submission_content": []}
+            return {"exam_content": []}
 
         results: List[Dict[str, Any]] = []
         for image_path in image_paths:
@@ -85,19 +81,33 @@ class ContentCorrectionExtraction:
                 )
                 results.append(self._error_item(image_path, str(exc)))
 
-        return {"submission_content": results}
+            return {"exam_content": results}
 
     def process_image(self, image_path: Path) -> Dict[str, Any]:
         question_type, confidence = self._classify_question_type(image_path)
-        structured = self._extract_by_type(image_path, question_type)
+
+        # Reuse extract_correction_content as the correction-content source.
+        structured = extract_correction_content(str(image_path))
+        if not structured:
+            return self._error_item(image_path, "Failed to extract correction content")
+
+        content_block = structured.get("content", {})
         return {
             "question_type": question_type,
             "confidence": confidence,
             "content": {
-                "content": structured.get("content", {}),
-                "student_answer": structured.get("student_answer", {}),
-                "confidence": structured.get("confidence", confidence),
+                "content": content_block.get("content", {}),
+                "correct_answer": content_block.get("correct_answer", {}),
+                "notes": content_block.get("notes", ["1 point"]),
+                "confidence": content_block.get("confidence", confidence),
             },
+            "meta_data": structured.get(
+                "meta_data",
+                {
+                    "image_path": str(image_path),
+                    "image_name": image_path.name,
+                },
+            ),
         }
 
     def _collect_image_paths(self, input_path: Path) -> List[Path]:
@@ -179,28 +189,6 @@ class ContentCorrectionExtraction:
         )
         return response.text or "{}"
 
-    def _extract_by_type(self, image_path: Path, question_type: str) -> Dict[str, Any]:
-        template = TEMPLATES_SUBMISSIONS_PROMPT.get(
-            question_type,
-            GENERIC_TEMPLATE_SUBMISSION,
-        )
-        prompt = BASE_PROMPT_SUBMISSION_EXTRACTION.format(
-            structure_placeholder=template
-        )
-
-        with open(image_path, "rb") as f:
-            file_bytes = f.read()
-
-        image_part = types.Part.from_bytes(
-            data=file_bytes,
-            mime_type=self._mime_type(image_path),
-        )
-        response = client.models.generate_content(
-            model="gemini-3.1-pro-preview",
-            contents=[prompt, image_part],
-        )
-        return self._parse_json(response.text or "{}")
-
     def _parse_json(self, text: str) -> Dict[str, Any]:
         cleaned = text.strip()
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -225,9 +213,13 @@ class ContentCorrectionExtraction:
             "confidence": 0.0,
             "content": {
                 "content": {},
-                "student_answer": {},
+                "correct_answer": {},
+                "notes": ["1 point"],
                 "confidence": 0.0,
                 "error": error_message,
+            },
+            "meta_data": {
+                "image_path": str(image_path),
                 "image_name": image_path.name,
             },
         }
@@ -235,7 +227,7 @@ class ContentCorrectionExtraction:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract question type then structured submission content."
+        description="Extract question type and correction content into exam_content schema."
     )
     parser.add_argument("input_path", type=Path, help="Image file or folder path")
     parser.add_argument(
@@ -257,9 +249,9 @@ def main() -> int:
     output_path = args.output
     if output_path is None:
         if args.input_path.is_dir():
-            output_name = args.input_path.name + "_submission_content.json"
+            output_name = args.input_path.name + "_exam_content.json"
         else:
-            output_name = args.input_path.stem + "_submission_content.json"
+            output_name = args.input_path.stem + "_exam_content.json"
         output_path = _OUTPUT_DIR / output_name
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 from question_extractor_google_cloud import QuestionExtractorGoogleCloud
 
 IMAGE_PATH = Path(
-    r"Exams/student_exam/exam_1_section_20.jpg"
+    r"Exams/google_vision/math/splited images into sections/exam_1/exam_1_section_12.jpg"
 )
 
 with QuestionExtractorGoogleCloud() as extractor:

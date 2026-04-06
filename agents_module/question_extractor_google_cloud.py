@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import re
 import sys
@@ -12,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 from google.api_core import exceptions as gcp_exceptions
-from google.cloud import vision
+from mistralai.client import Mistral
 
 # ── project-root path fix
 _PROJECT_ROOT = Path(__file__).resolve().parent
@@ -20,7 +21,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from logger_manager import LoggerManager
-from agents_module.agents_config import AgentsConfig
 from agents_module.prompts import (
     CLASSIFICATION_PROMPT,
     TEMPLATES_CORRECTION_PROMPT,
@@ -38,6 +38,7 @@ load_dotenv()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 MISTRAL_URL     = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_MODEL   = "mistral-small-latest"
+MISTRAL_OCR_MODEL = "mistral-ocr-latest"
 
 _MAX_TOKENS       = 2048
 _TEMPERATURE      = 0.1
@@ -57,20 +58,13 @@ class QuestionExtractorGoogleCloud:
         self.max_workers = max_workers
         self.executor    = ThreadPoolExecutor(max_workers=self.max_workers)
 
-        # Google Cloud Vision
-        if AgentsConfig.GOOGLE_API_KEY:
-            self.vision_client = vision.ImageAnnotatorClient(
-                client_options={"api_key": AgentsConfig.GOOGLE_API_KEY}
-            )
-            self.logger.info("Cloud Vision client initialised with API key from AgentsConfig")
-        else:
-            self.vision_client = vision.ImageAnnotatorClient()
-            self.logger.info("Cloud Vision client initialised via Application Default Credentials")
-
         if not MISTRAL_API_KEY:
             raise EnvironmentError("MISTRAL_API_KEY not found in .env")
 
+        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+
         self.logger.info(f"Mistral ready (model: {MISTRAL_MODEL})")
+        self.logger.info(f"Mistral OCR ready (model: {MISTRAL_OCR_MODEL})")
         self.logger.info("QuestionExtractorGoogleCloud ready")
 
     def __enter__(self) -> "QuestionExtractorGoogleCloud":
@@ -139,29 +133,27 @@ class QuestionExtractorGoogleCloud:
     def process_image(self, image_path: Path, is_submission: bool) -> Dict:
         self.logger.info(f"Processing: {image_path.name}")
         try:
-            with Image.open(image_path) as image:
+            # ── Step 1: OCR ───────────────────────────────────────────────
+            ocr_text = self._ocr_extract_text(image_path)
 
-                # ── Step 1: OCR ───────────────────────────────────────────────
-                ocr_text = self._ocr_extract_text(image)
+            if not ocr_text.strip():
+                self.logger.warning(f"{image_path.name}: OCR returned empty text")
+                return self._empty_result(image_path)
 
-                if not ocr_text.strip():
-                    self.logger.warning(f"{image_path.name}: OCR returned empty text")
-                    return self._empty_result(image_path)
+            # ── Step 2: Classify using CLASSIFICATION_PROMPT from prompts.py
+            question_type, confidence = self._classify(ocr_text)
 
-                # ── Step 2: Classify using CLASSIFICATION_PROMPT from prompts.py
-                question_type, confidence = self._classify(ocr_text)
+            # ── Step 3: Pick template from prompts.py ─────────────────────
+            templates = (
+                TEMPLATES_SUBMISSIONS_PROMPT
+                if is_submission
+                else TEMPLATES_CORRECTION_PROMPT
+            )
+            # Fall back to UNKNOWN template if type not in mapping
+            template = templates.get(question_type) or templates.get("UNKNOWN")
 
-                # ── Step 3: Pick template from prompts.py ─────────────────────
-                templates = (
-                    TEMPLATES_SUBMISSIONS_PROMPT
-                    if is_submission
-                    else TEMPLATES_CORRECTION_PROMPT
-                )
-                # Fall back to UNKNOWN template if type not in mapping
-                template = templates.get(question_type) or templates.get("UNKNOWN")
-
-                # ── Step 4: Extract using template from prompts.py ────────────
-                content = self._extract(ocr_text, template)
+            # ── Step 4: Extract using template from prompts.py ────────────
+            content = self._extract(ocr_text, template)
 
             return {
                 "question_type": question_type,
@@ -210,19 +202,25 @@ class QuestionExtractorGoogleCloud:
 
     # ── Step 1: OCR ───────────────────────────────────────────────────────────
 
-    def _ocr_extract_text(self, image: Image.Image) -> str:
+    def _ocr_extract_text(self, image_path: Path) -> str:
         attempt = 0
         while True:
             try:
-                buf = io.BytesIO()
-                image.save(buf, format="JPEG", quality=95)
-                response = self.vision_client.document_text_detection(
-                    image=vision.Image(content=buf.getvalue())
+                mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+                with open(image_path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("utf-8")
+
+                response = self.mistral_client.ocr.process(
+                    model=MISTRAL_OCR_MODEL,
+                    document={
+                        "type": "image_url",
+                        "image_url": f"data:{mime};base64,{encoded}",
+                    },
+                    include_image_base64=False,
                 )
-                if response.error.message:
-                    raise RuntimeError(f"Vision API error: {response.error.message}")
-                ann  = response.full_text_annotation
-                text = ann.text if ann and ann.text else ""
+                text = ""
+                if response and getattr(response, "pages", None):
+                    text = response.pages[0].markdown or ""
                 self.logger.debug(f"OCR extracted {len(text)} characters")
                 return text
 
@@ -239,6 +237,16 @@ class QuestionExtractorGoogleCloud:
                 self.logger.warning(
                     f"OCR transient error — retrying in {delay}s "
                     f"({attempt}/{_MAX_OCR_RETRIES})"
+                )
+                time.sleep(delay)
+            except Exception as exc:
+                attempt += 1
+                if attempt > _MAX_OCR_RETRIES:
+                    self.logger.error(f"Mistral OCR failed after {_MAX_OCR_RETRIES} retries: {exc}")
+                    raise
+                delay = min(_OCR_MAX_DELAY_S, _OCR_BASE_DELAY_S * (2 ** attempt))
+                self.logger.warning(
+                    f"OCR error — retrying in {delay}s ({attempt}/{_MAX_OCR_RETRIES}): {exc}"
                 )
                 time.sleep(delay)
 

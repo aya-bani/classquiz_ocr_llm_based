@@ -382,7 +382,7 @@ def print_summary(results: list[dict]):
 # ============================================
 
 def main():
-    INPUT_FOLDER = "Exams/sections/sc"
+    INPUT_FOLDER = "Exams\\google_vision\\test"
 
     print("🔍 Arabic Exam Structured Extractor")
     print("=" * 50)

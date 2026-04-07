@@ -61,16 +61,10 @@ def _to_structured_output(raw_data, image_path):
 		"question_type": "UNKNOWN",
 		"confidence": 0.95,
 		"content": {
-			"content": {
-				"question_number": question_number,
-				"question_text": question_text,
-				"subject": subject,
-				"options": options,
-			},
 			"correct_answer": {
 				"question_number": question_number,
 				"question_text": None,
-				"options": options,
+				"correct answer ": options,
 			},
 			"notes": ["1 point"],
 			"confidence": 0.95,

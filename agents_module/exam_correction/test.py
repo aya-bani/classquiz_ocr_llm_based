@@ -119,14 +119,34 @@ def _build_grading_payload(
 	return question_rows, max_score
 
 
-def _build_grading_prompt(rows: List[Dict[str, Any]]) -> str:
+def _detect_feedback_language(rows: List[Dict[str, Any]]) -> str:
+	"""Infer feedback language from student answers (Arabic/French/English)."""
+	all_student_text = "\n".join(str(r.get("student_answer", "")) for r in rows)
+	if re.search(r"[\u0600-\u06FF]", all_student_text):
+		return "Arabic"
+
+	# Light heuristic for French accents.
+	if re.search(r"[àâäçéèêëîïôöùûüÿœæÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸŒÆ]", all_student_text):
+		return "French"
+
+	return "English"
+
+
+def _build_grading_prompt(rows: List[Dict[str, Any]], feedback_language: str) -> str:
 	return (
 		"You are an expert and kind primary-school teacher grading answers. "
 		"Students are 6-10 years old. Be encouraging, simple, and friendly.\n\n"
+		f"Write ALL feedback strictly in {feedback_language}. "
+		"Do not switch languages and do not translate into another language.\n\n"
 		"Grade each question by semantic similarity between student_answer and correct_answer.\n"
 		"Scoring rule: points must be one of [0, 0.25, 0.5, 0.75, 1] scaled by max_points.\n"
 		"For each question, choose the nearest allowed value and do not exceed max_points.\n"
 		"Then provide overall feedback for the child.\n\n"
+		"Customization requirements:\n"
+		"- Mention at least one specific element from the student's actual response.\n"
+		"- Mention one clear next step the student can do to improve.\n"
+		"- If the student answer is empty or unclear, say that gently and encourage retry.\n"
+		"- Keep vocabulary age-appropriate for children (6-10 years old).\n\n"
 		"Return ONLY valid JSON in this exact format:\n"
 		"{\n"
 		"  \"detailed_results\": [\n"
@@ -181,7 +201,8 @@ def grade_exam(
 	correction_json = _load_json_file(correction_json_path)
 
 	rows, max_score = _build_grading_payload(submission_json, correction_json)
-	prompt = _build_grading_prompt(rows)
+	feedback_language = _detect_feedback_language(rows)
+	prompt = _build_grading_prompt(rows, feedback_language)
 	grading_data = _call_gemini_with_retry(prompt)
 
 	details = grading_data.get("detailed_results", [])

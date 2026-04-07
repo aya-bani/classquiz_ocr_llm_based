@@ -50,6 +50,20 @@ _OCR_MAX_DELAY_S  = 60
 _MAX_LLM_RETRIES  = 3
 _LLM_RETRY_DELAY  = 15
 
+_ALLOWED_QUESTION_TYPES = {
+    "ENONCE",
+    "WRITING",
+    "RELATING",
+    "TABLE",
+    "MULTIPLE_CHOICE",
+    "TRUE_FALSE",
+    "FILL_BLANK",
+    "SHORT_ANSWER",
+    "CALCULATION",
+    "DIAGRAM",
+    "UNKNOWN",
+}
+
 
 class QuestionExtractorGoogleCloud:
 
@@ -126,7 +140,8 @@ class QuestionExtractorGoogleCloud:
         if save_results:
             self._save_results(
                 results,
-                output_path or Path("question_analysis_results.json"),
+                output_path
+                or Path("agents_module/question_classification"),
             )
         return results
 
@@ -304,7 +319,10 @@ class QuestionExtractorGoogleCloud:
         system = (
             "You are an expert exam question classifier. "
             "Return ONLY valid JSON: "
-            "{\"question_type\": \"...\", \"confidence\": 0.0, \"reasoning\": \"...\"}"
+            "{\"question_type\": \"...\", \"confidence\": 0.0, \"reasoning\": \"...\"}. "
+            "question_type MUST be exactly one of: ENONCE, WRITING, RELATING, "
+            "TABLE, MULTIPLE_CHOICE, TRUE_FALSE, FILL_BLANK, SHORT_ANSWER, "
+            "CALCULATION, DIAGRAM, UNKNOWN."
         )
         user = (
             f"{CLASSIFICATION_PROMPT}\n\n"
@@ -315,8 +333,17 @@ class QuestionExtractorGoogleCloud:
         raw  = self._mistral_call(system, user)
         data = self._parse_json(raw)
 
-        question_type = str(data.get("question_type", "UNKNOWN")).upper()
+        question_type = str(data.get("question_type", "UNKNOWN")).upper().strip()
         confidence    = float(data.get("confidence", 0.5))
+
+        if question_type not in _ALLOWED_QUESTION_TYPES:
+            fallback_type = self._rule_based_fallback_type(ocr_text)
+            self.logger.warning(
+                f"[classify] invalid type '{question_type}' from model; "
+                f"fallback -> {fallback_type}"
+            )
+            question_type = fallback_type
+            confidence = min(confidence, 0.6)
 
         self.logger.info(
             f"[classify] {question_type} ({confidence:.2f}) "
@@ -324,15 +351,45 @@ class QuestionExtractorGoogleCloud:
         )
         return question_type, confidence
 
+    @staticmethod
+    def _rule_based_fallback_type(ocr_text: str) -> str:
+        text = (ocr_text or "").lower()
+
+        if re.search(r"\b(a|b|c|d)\b", text):
+            return "MULTIPLE_CHOICE"
+        if re.search(r"true\s*/\s*false|vrai\s*/\s*faux|\bt\s*/\s*f\b", text):
+            return "TRUE_FALSE"
+        if re.search(r"____|\[___\]|\.{4,}", text):
+            return "FILL_BLANK"
+        if re.search(r"table|row|column|\|", text):
+            return "TABLE"
+        if re.search(r"match|connect|pair|column", text):
+            return "RELATING"
+        if re.search(r"diagram|graph|chart|label", text):
+            return "DIAGRAM"
+        if re.search(r"calculate|solve|find the value|=|\d", text):
+            return "CALCULATION"
+        if re.search(r"write|discuss|explain in detail|paragraph|essay", text):
+            return "WRITING"
+        if re.search(r"define|what is|name|list", text):
+            return "SHORT_ANSWER"
+        if re.search(r"instruction|context|read the following", text):
+            return "ENONCE"
+        return "UNKNOWN"
+
     # ── Step 3: Extract ───────────────────────────────────────────────────────
 
     def _extract(self, ocr_text: str, template: str) -> Dict:
         system = (
             "You are an expert exam content extractor. "
-            "Return ONLY valid JSON — no markdown, no extra text."
+            "Return ONLY valid JSON — no markdown, no extra text. "
+            "Do NOT translate any extracted text. Preserve the original language "
+            "and script exactly as found in OCR text."
         )
         user = (
             f"{template}\n\n"
+            "IMPORTANT: Keep question text exactly as in OCR. No translation to English "
+            "or any other language.\n\n"
             "NOTE: Extract from OCR text below (no image available).\n\n"
             f"OCR TEXT:\n{ocr_text}"
         )
@@ -392,12 +449,75 @@ class QuestionExtractorGoogleCloud:
 
     def _save_results(self, results: List[Dict], output_path: Path) -> None:
         try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as fh:
-                json.dump(results, fh, indent=2, ensure_ascii=False)
-            self.logger.info(f"Results saved → {output_path}")
+            is_json_file = output_path.suffix.lower() == ".json"
+            output_dir = output_path.parent if is_json_file else output_path
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            saved_files = 0
+            for idx, result in enumerate(results, start=1):
+                image_name = result.get("meta_data", {}).get("image_name", "")
+                stem = Path(image_name).stem if image_name else f"question_{idx}"
+                safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+                safe_stem = safe_stem or f"question_{idx}"
+
+                question_file = output_dir / f"{idx:03d}_{safe_stem}.json"
+                with open(question_file, "w", encoding="utf-8") as fh:
+                    json.dump(result, fh, indent=2, ensure_ascii=False)
+                saved_files += 1
+
+            # Keep backward compatibility when user explicitly asks for a combined JSON file.
+            if is_json_file:
+                with open(output_path, "w", encoding="utf-8") as fh:
+                    json.dump(results, fh, indent=2, ensure_ascii=False)
+                self.logger.info(f"Combined results saved → {output_path}")
+
+            self.logger.info(
+                f"Saved {saved_files} question JSON file(s) in {output_dir}"
+            )
         except Exception as exc:
             self.logger.error(f"Failed to save results: {exc}", exc_info=True)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Test QuestionExtractorGoogleCloud and export question JSON files"
+    )
+    parser.add_argument(
+        "--folder",
+        default="Exams/sections",
+        help="Folder that contains question images",
+    )
+    parser.add_argument(
+        "--output",
+        default="agents_module/question_classification",
+        help="Output folder for JSON files",
+    )
+    parser.add_argument(
+        "--submission",
+        action="store_true",
+        help="Use submission templates instead of correction templates",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=5,
+        help="Thread pool size",
+    )
+
+    args = parser.parse_args()
+
+    with QuestionExtractorGoogleCloud(max_workers=args.workers) as extractor:
+        results = extractor.process_exam(
+            folder_path=Path(args.folder),
+            is_submission=args.submission,
+            save_results=True,
+            output_path=Path(args.output),
+        )
+
+    print(f"Processed: {len(results)} image(s)")
+    print(f"Saved JSON files in: {Path(args.output)}")
 
 
 # ── backward-compatible alias ─────────────────────────────────────────────────

@@ -12,10 +12,16 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from agents_module.prompts import (
-	CLASSIFICATION_PROMPT,
-	TEMPLATES_CORRECTION_PROMPT,
-)
+try:
+	from agents_module.prompts import (
+		CLASSIFICATION_PROMPT,
+		TEMPLATES_CORRECTION_PROMPT,
+	)
+except Exception:
+	from prompts import (  # type: ignore
+		CLASSIFICATION_PROMPT,
+		TEMPLATES_CORRECTION_PROMPT,
+	)
 
 load_dotenv()
 

@@ -25,6 +25,14 @@ Instructions:
 - Keep the original language (Arabic, French, English, Numbers).
 - If a field is missing or unreadable, set its value to [UNK].
 - Return ONLY a valid JSON object with the extracted fields, nothing else.
+
+Canonical answer format (must stay consistent with student OCR extraction):
+- RELATING/MATCHING: corrected_answer must be one mapping per line: "<item> -> <option>"
+- MULTIPLE_CHOICE: one line: "selected: <correct_option_ids_or_text>"
+- TRUE_FALSE: one statement per line: "<statement_id_or_text> -> <true/false>"
+- FILL_BLANK: one blank per line: "<blank_index> -> <answer>"
+- SHORT_ANSWER/WRITING/CALCULATION: plain answer text only (no extra explanation)
+- DIAGRAM: concise labels/annotations only, one per line if multiple
 """
 
 
@@ -33,6 +41,19 @@ def _normalize_arabic_digits(text):
 		return text
 	trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 	return text.translate(trans)
+
+
+def _canonicalize_text(text):
+	if not isinstance(text, str):
+		return "[UNK]"
+	cleaned = text.strip()
+	if not cleaned:
+		return "[UNK]"
+
+	cleaned = cleaned.replace("➔", "->").replace("→", "->").replace("⇒", "->")
+	cleaned = cleaned.replace("**", "")
+	lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+	return "\n".join(lines) if lines else "[UNK]"
 
 
 def _extract_question_number(question_text):
@@ -48,7 +69,7 @@ def _extract_question_number(question_text):
 
 def _to_structured_output(raw_data, image_path):
 	question_text = raw_data.get("question")
-	corrected_answer = raw_data.get("corrected_answer")
+	corrected_answer = _canonicalize_text(raw_data.get("corrected_answer"))
 	subject = raw_data.get("subject")
 	question_number = _extract_question_number(question_text)
 

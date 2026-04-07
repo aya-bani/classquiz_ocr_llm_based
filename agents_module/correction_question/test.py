@@ -18,15 +18,15 @@ from question_classifier import QuestionClassifier
 from extract_correction_content import extract_correction_content
 
 
-def _extract_correct_answer(image_path: Path) -> Dict[str, Any]:
+def _extract_correct_answer(
+	image_path: Path,
+	question_content: Dict[str, Any],
+	question_type: str,
+) -> Dict[str, Any]:
 	"""Use extract_correction_content to get corrected answer from correction image."""
 	extracted = extract_correction_content(str(image_path))
 	if not extracted:
-		return {
-			"question_number": None,
-			"question_text": None,
-			"raw_text": "[UNK]",
-		}
+		return {"raw_text": "[UNK]"}
 
 	content = extracted.get("content", {})
 	correct_answer = content.get("correct_answer", {})
@@ -41,11 +41,18 @@ def _extract_correct_answer(image_path: Path) -> Dict[str, Any]:
 	else:
 		raw_text = "[UNK]"
 
-	return {
-		"question_number": correct_answer.get("question_number"),
-		"question_text": correct_answer.get("question_text"),
-		"raw_text": raw_text or "[UNK]",
-	}
+	answer = {"raw_text": raw_text or "[UNK]"}
+
+	if str(question_type).upper() == "RELATING":
+		matches = (
+			question_content.get("correct_answer", {}).get("matches", [])
+			if isinstance(question_content, dict)
+			else []
+		)
+		if isinstance(matches, list):
+			answer["matches"] = matches
+
+	return answer
 
 
 def build_exam_content(image_path: Path) -> Dict[str, Any]:
@@ -57,14 +64,21 @@ def build_exam_content(image_path: Path) -> Dict[str, Any]:
 		classification["question_type"],
 	)
 
-	correct_answer = _extract_correct_answer(image_path)
+	question_type = classification.get("question_type", "UNKNOWN")
+	question_content = question_block.get("content", {})
+
+	correct_answer = _extract_correct_answer(
+		image_path,
+		question_content,
+		question_type,
+	)
 
 	confidence = float(classification.get("confidence", 0.0))
 	item = {
-		"question_type": classification.get("question_type", "UNKNOWN"),
+		"question_type": question_type,
 		"confidence": confidence,
 		"content": {
-			"content": question_block.get("content", {}),
+			"content": question_content,
 			"correct_answer": correct_answer,
 			"notes": ["1 point"],
 			"confidence": confidence,

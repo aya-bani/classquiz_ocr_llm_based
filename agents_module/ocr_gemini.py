@@ -23,10 +23,36 @@ Instructions:
 - Keep the original language (Arabic, French, English, Numbers).
 - Do NOT translate or guess missing content.
 - Unreadable → [UNK]
-- Return ONLY the extracted handwritten answers, nothing else. Highlight them clearly in your output.
+- Return ONLY the extracted handwritten answers, nothing else.
+
+Canonical answer format (must stay consistent with correction extraction):
+- RELATING/MATCHING: one mapping per line in this exact form: "<item> -> <option>"
+- MULTIPLE_CHOICE: one line: "selected: <option_ids_or_text>"
+- TRUE_FALSE: one statement per line: "<statement_id_or_text> -> <true/false>"
+- FILL_BLANK: one blank per line: "<blank_index> -> <answer>"
+- SHORT_ANSWER/WRITING/CALCULATION: plain answer text only (no extra explanation)
+- DIAGRAM: concise labels/annotations only, one per line if multiple
 """
 
 CONF_THRESHOLD = 0.75
+
+
+def _canonicalize_text(text):
+    if not isinstance(text, str):
+        return "[UNK]"
+    cleaned = text.strip()
+    if not cleaned:
+        return "[UNK]"
+
+    # Normalize common arrow glyphs to a single representation.
+    cleaned = cleaned.replace("➔", "->").replace("→", "->").replace("⇒", "->")
+
+    # Remove markdown emphasis commonly returned by LLM responses.
+    cleaned = cleaned.replace("**", "")
+
+    # Collapse trailing spaces while preserving line structure.
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    return "\n".join(lines) if lines else "[UNK]"
 
 
 # ---------------- OCR ---------------- #
@@ -46,7 +72,7 @@ def run_ocr(file_path):
         contents=[OCR_PROMPT, image_part]  
     )
 
-    return response.text
+    return _canonicalize_text(response.text if response else "")
 
 
 # ---------------- CLEANING ---------------- #
@@ -118,7 +144,7 @@ if __name__ == "__main__":
             return response.text
 
         raw = run_ocr_with_mime(img_path, mime_type)
-        content = raw.strip() if raw else "[UNK]"
+        content = _canonicalize_text(raw)
 
         base_name = os.path.splitext(os.path.basename(img_path))[0]
 

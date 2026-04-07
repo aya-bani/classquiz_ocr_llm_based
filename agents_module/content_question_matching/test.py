@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -19,15 +20,77 @@ from question_classifier import QuestionClassifier
 import ocr_gemini
 
 
-def _extract_student_answer(image_path: Path) -> Dict[str, Any]:
+def _normalize_text(text: str) -> str:
+	text = (text or "").strip().lower()
+	text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+	text = text.replace("ى", "ي").replace("ة", "ه")
+	text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
+	text = text.replace("**", "")
+	text = re.sub(r"\s+", " ", text)
+	return text
+
+
+def _extract_relating_matches(raw_text: str, question_content: Dict[str, Any]) -> list:
+	items = question_content.get("items", []) if isinstance(question_content, dict) else []
+	options = question_content.get("options", []) if isinstance(question_content, dict) else []
+
+	if not isinstance(items, list) or not isinstance(options, list):
+		return []
+
+	item_lookup = {
+		_normalize_text(str(item.get("text", ""))): str(item.get("id", ""))
+		for item in items
+		if isinstance(item, dict)
+	}
+	option_lookup = {
+		_normalize_text(str(opt.get("text", ""))): str(opt.get("id", ""))
+		for opt in options
+		if isinstance(opt, dict)
+	}
+
+	lines = [line.strip() for line in str(raw_text or "").splitlines() if line.strip()]
+	matches = []
+	for line in lines:
+		parts = re.split(r"\s*->\s*|\s*➔\s*|\s*→\s*", line, maxsplit=1)
+		if len(parts) != 2:
+			continue
+
+		left = _normalize_text(parts[0])
+		right = _normalize_text(parts[1])
+
+		item_id = item_lookup.get(left)
+		option_id = option_lookup.get(right)
+		if item_id and option_id:
+			matches.append({"item_id": item_id, "option_id": option_id})
+
+	return matches
+
+
+def _build_structured_student_answer(
+	question_type: str,
+	question_content: Dict[str, Any],
+	raw_text: str,
+) -> Dict[str, Any]:
+	structured_answer = {"raw_text": raw_text}
+
+	if str(question_type).upper() == "RELATING":
+		structured_answer["matches"] = _extract_relating_matches(raw_text, question_content)
+
+	return structured_answer
+
+
+def _extract_student_answer(
+	image_path: Path,
+	question_type: str,
+	question_content: Dict[str, Any],
+) -> Dict[str, Any]:
 	"""Use ocr_gemini to extract student's handwritten answer from an image."""
 	ocr_text = ocr_gemini.run_ocr(str(image_path))
 	content = (ocr_text or "").strip()
 	if not content:
 		content = "[UNK]"
 
-	# Keep flexible structure since answer format depends on question type.
-	return {"raw_text": content}
+	return _build_structured_student_answer(question_type, question_content, content)
 
 
 def match_question_and_answer(image_path: Path) -> Dict[str, Any]:
@@ -52,11 +115,12 @@ def match_question_and_answer(image_path: Path) -> Dict[str, Any]:
 		},
 	}
 
-	student_answer = _extract_student_answer(image_path)
-
 	question_type = question_data.get("question_type", "UNKNOWN")
 	confidence = float(question_data.get("confidence", 0.0))
 	question_content = question_data.get("content", {})
+	student_answer = _extract_student_answer(image_path, question_type, question_content)
+	question_content_with_student = dict(question_content)
+	question_content_with_student["student_answer"] = student_answer
 	meta_data = question_data.get(
 		"meta_data",
 		{
@@ -69,7 +133,7 @@ def match_question_and_answer(image_path: Path) -> Dict[str, Any]:
 		"question_type": question_type,
 		"confidence": confidence,
 		"content": {
-			"content": question_content,
+			"content": question_content_with_student,
 			"student_answer": student_answer,
 			"confidence": confidence,
 		},

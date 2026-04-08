@@ -59,12 +59,20 @@ def _extract_max_points(item: Dict[str, Any]) -> float:
 	return 1.0
 
 
-def _build_index_by_qnum(items: List[Dict[str, Any]], answer_key: str) -> Dict[str, Dict[str, Any]]:
+def _pick_first_dict(container: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+	for key in keys:
+		value = container.get(key)
+		if isinstance(value, dict):
+			return value
+	return {}
+
+
+def _build_index_by_qnum(items: List[Dict[str, Any]], answer_keys: List[str]) -> Dict[str, Dict[str, Any]]:
 	indexed: Dict[str, Dict[str, Any]] = {}
 	for item in items:
 		content = item.get("content", {})
 		content_block = content.get("content", {})
-		answer_block = content.get(answer_key, {})
+		answer_block = _pick_first_dict(content, answer_keys)
 
 		qn = content_block.get("question_number")
 		if qn is None:
@@ -78,11 +86,11 @@ def _build_grading_payload(
 	submission_json: Dict[str, Any],
 	correction_json: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], float]:
-	submission_items = submission_json.get("submission_content", [])
-	correction_items = correction_json.get("exam_content", [])
+	submission_items = submission_json.get("submission_content") or submission_json.get("exam_content", [])
+	correction_items = correction_json.get("exam_content") or correction_json.get("correction_content", [])
 
-	sub_index = _build_index_by_qnum(submission_items, "student_answer")
-	cor_index = _build_index_by_qnum(correction_items, "correct_answer")
+	sub_index = _build_index_by_qnum(submission_items, ["student_answer", "student_submission"])
+	cor_index = _build_index_by_qnum(correction_items, ["correct_answer"])
 
 	question_rows: List[Dict[str, Any]] = []
 	max_score = 0.0
@@ -91,11 +99,11 @@ def _build_grading_payload(
 		sub_item = sub_index.get(qn, {})
 
 		cor_content = cor_item.get("content", {})
-		cor_answer = cor_content.get("correct_answer", {})
+		cor_answer = _pick_first_dict(cor_content, ["correct_answer"])
 		cor_text = str(cor_answer.get("raw_text", "")).strip()
 
 		sub_content = sub_item.get("content", {}) if isinstance(sub_item, dict) else {}
-		sub_answer = sub_content.get("student_answer", {})
+		sub_answer = _pick_first_dict(sub_content, ["student_answer", "student_submission"])
 		sub_text = str(sub_answer.get("raw_text", "")).strip()
 
 		question_text = ""

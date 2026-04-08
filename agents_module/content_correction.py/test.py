@@ -265,6 +265,34 @@ def _build_structured_answer(
                 lookup[part_id] for part_id in selected_ids if part_id in lookup
             ]
             answer["raw_text"] = f"selected_parts:{','.join(selected_ids)}"
+        else:
+            # Fallback for non-numeric part IDs (e.g., A/B clocks): keep a stable text output.
+            parts = question_content.get("parts_to_label", [])
+            if isinstance(parts, list):
+                descriptions = [
+                    str(part.get("description", "")).strip()
+                    for part in parts
+                    if isinstance(part, dict) and str(part.get("description", "")).strip()
+                ]
+                if descriptions:
+                    answer["raw_text"] = " ".join(descriptions)
+                else:
+                    # Last-resort fallback when the model doesn't return parts_to_label.
+                    diagram_description = str(question_content.get("diagram_description", "")).strip()
+                    if diagram_description:
+                        segments = [
+                            s.strip()
+                            for s in re.split(r"[.!?]\s+", diagram_description)
+                            if s.strip()
+                        ]
+                        lr_segments = [
+                            s for s in segments
+                            if re.search(r"\bleft\b|\bright\b|\bclock\b", s, re.IGNORECASE)
+                        ]
+                        if lr_segments:
+                            answer["raw_text"] = " ".join(lr_segments)
+                        else:
+                            answer["raw_text"] = diagram_description
 
     return answer
 
@@ -314,7 +342,11 @@ def build_unified_content(
 
     question_type = classification.get("question_type", "UNKNOWN")
     confidence = float(classification.get("confidence", 0.0))
-    question_content = question_block.get("content", {})
+    question_content = dict(question_block.get("content", {}))
+
+    # Keep only pure question definition in this block; answers are stored once below.
+    question_content.pop("student_answer", None)
+    question_content.pop("correct_answer", None)
 
     mode_info = _infer_is_submission(image_path, manual_flag)
     is_submission = bool(mode_info["is_submission"])
@@ -329,7 +361,6 @@ def build_unified_content(
         "confidence": confidence,
     }
     if is_submission:
-        content_block["student_submission"] = answer
         content_block["student_answer"] = answer
     else:
         content_block["correct_answer"] = answer

@@ -6,12 +6,13 @@ import mimetypes
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 load_dotenv()
 
@@ -22,9 +23,34 @@ AGENTS_MODULE_DIR = Path(__file__).resolve().parents[1]
 if str(AGENTS_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_MODULE_DIR))
 
-GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
-client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-3.1-pro-preview"
+# ✅ Fix 1: Use GEMINI_API_KEY with Google AI Studio (no vertexai=True)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ✅ Fix 2: Use a valid model name
+GEMINI_MODEL = "gemini-2.0-flash"
+
+
+# ✅ Fix 3: Retry wrapper for RESOURCE_EXHAUSTED (429) errors
+def _generate_with_retry(
+    model: str,
+    contents,
+    retries: int = 3,
+    wait: int = 15,
+):
+    """Call generate_content with automatic retry on rate-limit errors."""
+    for attempt in range(retries):
+        try:
+            return client.models.generate_content(model=model, contents=contents)
+        except errors.APIError as e:
+            if "RESOURCE_EXHAUSTED" in str(e) and attempt < retries - 1:
+                print(
+                    f"⚠️  Rate limited. Waiting {wait}s "
+                    f"(attempt {attempt + 1}/{retries})..."
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _normalize_text(text: str) -> str:
@@ -63,7 +89,8 @@ def _detect_handwritten_content(image_path: Path) -> Dict[str, Any]:
         "confidence (0..1), reason (short string)."
     )
     try:
-        response = client.models.generate_content(
+        # ✅ Fix 4: Use retry wrapper instead of direct client call
+        response = _generate_with_retry(
             model=GEMINI_MODEL,
             contents=[prompt, _image_part(image_path)],
         )
@@ -266,7 +293,6 @@ def _build_structured_answer(
             ]
             answer["raw_text"] = f"selected_parts:{','.join(selected_ids)}"
         else:
-            # Fallback for non-numeric part IDs (e.g., A/B clocks): keep a stable text output.
             parts = question_content.get("parts_to_label", [])
             if isinstance(parts, list):
                 descriptions = [
@@ -277,7 +303,6 @@ def _build_structured_answer(
                 if descriptions:
                     answer["raw_text"] = " ".join(descriptions)
                 else:
-                    # Last-resort fallback when the model doesn't return parts_to_label.
                     diagram_description = str(question_content.get("diagram_description", "")).strip()
                     if diagram_description:
                         segments = [
@@ -344,7 +369,6 @@ def build_unified_content(
     confidence = float(classification.get("confidence", 0.0))
     question_content = dict(question_block.get("content", {}))
 
-    # Keep only pure question definition in this block; answers are stored once below.
     question_content.pop("student_answer", None)
     question_content.pop("correct_answer", None)
 
@@ -399,7 +423,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Unified exam image analyzer for submission/correction"
     )
-    parser.add_argument("--image", required=True, help="Path to image")
+    parser.add_argument(
+        "--image",
+        required=True,
+        nargs="+",  # ✅ Fix 5: Accept one or more image paths
+        help="Path(s) to image file(s)",
+    )
     parser.add_argument(
         "--is_submission_flag",
         default="auto",
@@ -416,28 +445,37 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    image_path = Path(args.image)
-    if not image_path.exists():
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
     manual_flag = _parse_manual_flag(args.is_submission_flag)
-    result = build_unified_content(image_path, manual_flag)
 
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = Path(
-            "agents_module/content_correction.py/output_json"
-        ) / f"{image_path.stem}_unified.json"
+    image_paths = [Path(p) for p in args.image]
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    for i, image_path in enumerate(image_paths):
+        if not image_path.exists():
+            print(f"⚠️  Skipping missing file: {image_path}")
+            continue
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    print(f"\nSaved JSON: {output_path}")
+        print(f"📤 Processing {image_path}...")
+
+        result = build_unified_content(image_path, manual_flag)
+
+        if args.output and len(image_paths) == 1:
+            output_path = Path(args.output)
+        else:
+            output_path = Path(
+                "agents_module/content_correction.py/output_json"
+            ) / f"{image_path.stem}_unified.json"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(f"✅ Saved JSON: {output_path}")
+
+        # ✅ Fix 6: Avoid quota bursting when processing multiple images
+        if i < len(image_paths) - 1:
+            time.sleep(2)
 
 
 if __name__ == "__main__":
     main()
-

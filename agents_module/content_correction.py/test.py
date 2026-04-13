@@ -284,6 +284,16 @@ def _build_structured_answer(
         answer["matches"] = _extract_relating_matches(raw_text, question_content)
 
     if normalized_type == "DIAGRAM":
+        question_text_norm = _normalize_text(str(question_content.get("question_text", "")))
+        if "اسميهما" in question_text_norm:
+            answer_lines = [
+                line.strip()
+                for line in str(answer.get("raw_text", "") or "").splitlines()
+                if line.strip() and line.strip() != "[UNK]"
+            ]
+            if len(answer_lines) > 2:
+                answer["raw_text"] = "\n".join(answer_lines[:2])
+
         selected_ids = _extract_diagram_selected_parts(raw_text, question_content)
         if selected_ids:
             lookup = _diagram_parts_lookup(question_content)
@@ -292,32 +302,6 @@ def _build_structured_answer(
                 lookup[part_id] for part_id in selected_ids if part_id in lookup
             ]
             answer["raw_text"] = f"selected_parts:{','.join(selected_ids)}"
-        else:
-            parts = question_content.get("parts_to_label", [])
-            if isinstance(parts, list):
-                descriptions = [
-                    str(part.get("description", "")).strip()
-                    for part in parts
-                    if isinstance(part, dict) and str(part.get("description", "")).strip()
-                ]
-                if descriptions:
-                    answer["raw_text"] = " ".join(descriptions)
-                else:
-                    diagram_description = str(question_content.get("diagram_description", "")).strip()
-                    if diagram_description:
-                        segments = [
-                            s.strip()
-                            for s in re.split(r"[.!?]\s+", diagram_description)
-                            if s.strip()
-                        ]
-                        lr_segments = [
-                            s for s in segments
-                            if re.search(r"\bleft\b|\bright\b|\bclock\b", s, re.IGNORECASE)
-                        ]
-                        if lr_segments:
-                            answer["raw_text"] = " ".join(lr_segments)
-                        else:
-                            answer["raw_text"] = diagram_description
 
     return answer
 

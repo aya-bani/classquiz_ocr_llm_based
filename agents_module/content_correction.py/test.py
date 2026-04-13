@@ -127,7 +127,15 @@ def _infer_is_submission(
             "handwriting": None,
         }
 
-    correction_tokens = ["correction", "corrige", "corrig", "model_answer"]
+    correction_tokens = [
+        "correction",
+        "corrige",
+        "corrig",
+        "model_answer",
+        "/corr/",
+        "_corr",
+        "corr_",
+    ]
     if any(tok in path_norm for tok in correction_tokens):
         return {
             "is_submission": False,
@@ -136,6 +144,13 @@ def _infer_is_submission(
         }
 
     handwriting = _detect_handwritten_content(image_path)
+    if str(handwriting.get("reason", "")) == "handwriting_detection_failed":
+        return {
+            "is_submission": True,
+            "decision_source": "handwriting_fallback",
+            "handwriting": handwriting,
+        }
+
     return {
         "is_submission": bool(handwriting.get("has_handwritten", False)),
         "decision_source": "handwriting_rule",

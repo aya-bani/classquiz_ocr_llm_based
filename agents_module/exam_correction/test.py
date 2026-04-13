@@ -67,6 +67,24 @@ def _pick_first_dict(container: Dict[str, Any], keys: List[str]) -> Dict[str, An
 	return {}
 
 
+def _text_from_answer_block(answer_block: Dict[str, Any]) -> str:
+	if not isinstance(answer_block, dict):
+		return ""
+	return str(answer_block.get("raw_text", "")).strip()
+
+
+def _text_from_answers_list(content_block: Dict[str, Any]) -> str:
+	if not isinstance(content_block, dict):
+		return ""
+	answers = content_block.get("answers", [])
+	if not isinstance(answers, list):
+		return ""
+	lines = [str(a).strip() for a in answers if str(a).strip()]
+	if not lines:
+		return ""
+	return "\n".join(f"{idx} -> {value}" for idx, value in enumerate(lines, 1))
+
+
 def _build_index_by_qnum(items: List[Dict[str, Any]], answer_keys: List[str]) -> Dict[str, Dict[str, Any]]:
 	indexed: Dict[str, Dict[str, Any]] = {}
 	for item in items:
@@ -100,11 +118,19 @@ def _build_grading_payload(
 
 		cor_content = cor_item.get("content", {})
 		cor_answer = _pick_first_dict(cor_content, ["correct_answer"])
-		cor_text = str(cor_answer.get("raw_text", "")).strip()
+		cor_text = _text_from_answer_block(cor_answer)
+		if not cor_text:
+			cor_q = cor_content.get("content", {})
+			if isinstance(cor_q, dict):
+				cor_text = _text_from_answers_list(cor_q)
 
 		sub_content = sub_item.get("content", {}) if isinstance(sub_item, dict) else {}
 		sub_answer = _pick_first_dict(sub_content, ["student_answer", "student_submission"])
-		sub_text = str(sub_answer.get("raw_text", "")).strip()
+		sub_text = _text_from_answer_block(sub_answer)
+		if not sub_text:
+			# Fallback for mis-flagged submission files where student answer was stored as correct_answer.
+			sub_fallback = _pick_first_dict(sub_content, ["correct_answer"])
+			sub_text = _text_from_answer_block(sub_fallback)
 
 		question_text = ""
 		cor_q = cor_content.get("content", {})
@@ -152,6 +178,8 @@ def _build_grading_prompt(rows: List[Dict[str, Any]], feedback_language: str) ->
 		"Then provide overall feedback for the child.\n\n"
 		"Customization requirements:\n"
 		"- Mention at least one specific element from the student's actual response.\n"
+		"- If the response is wrong, explain the exact difference between the student's term and the correct term in simple child-friendly words.\n"
+		"- For this type of confusion, explicitly clarify contrasts such as: 'أشد صلابة' vs 'أكثر لينا' and indicate where each one should be used.\n"
 		"- Mention one clear next step the student can do to improve.\n"
 		"- If the student answer is empty or unclear, say that gently and encourage retry.\n"
 		"- Keep vocabulary age-appropriate for children (6-10 years old).\n\n"

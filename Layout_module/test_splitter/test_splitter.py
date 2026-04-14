@@ -9,7 +9,11 @@ import shutil
 def main():
     # input image from the Exams folder
     project_root = Path(__file__).resolve().parents[2]
-    img_file = project_root / "Exams" / "croped_corrections" / "exam_pdf_cropped.jpg"
+    if len(sys.argv) > 1:
+        input_path = Path(sys.argv[1]).expanduser()
+        img_file = input_path if input_path.is_absolute() else (project_root / input_path)
+    else:
+        img_file = project_root / "Exams" / "croped_corrections" / "exam_pdf_cropped.jpg"
     if not img_file.exists():
         raise FileNotFoundError(f"Expected test image not found: {img_file}")
 
@@ -20,7 +24,7 @@ def main():
     result = splitter.split_and_save(image, exam_id=1)
 
     # move the generated directory to the requested output location
-    dest_root = project_root / "Exams" / "google_vision" / "math" / "splited images into sections"
+    dest_root = project_root / "Exams" / "sections_sp"
     dest_root.mkdir(parents=True, exist_ok=True)
 
     src_dir = Path(result["sections_dir"])

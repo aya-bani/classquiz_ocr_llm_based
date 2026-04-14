@@ -27,7 +27,8 @@ class LayoutConfig:
 
 
     # OCR and keyword matching
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    # GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
     CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH"))
     
     # Gemini API for keyword extraction

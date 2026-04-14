@@ -23,13 +23,12 @@ class ImageSplitter:
     def __init__(self):
         self.logger = LoggerManager.get_logger(__name__)
 
-        # Load API key from .env
         GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
 
         if not GEMINI_API_KEY:
             raise ValueError("❌ GOOGLE_CLOUD_API_KEY not found in .env")
 
-        # Initialize Gemini client
+        # ✅ SAME CONFIG
         self.client = genai.Client(
             vertexai=True,
             api_key=GEMINI_API_KEY
@@ -56,11 +55,10 @@ class ImageSplitter:
     # ---------------- OCR + DETECTION ---------------- #
     def detect_section_lines(self, image: Image.Image) -> List[Tuple[int, int, int, int]]:
         """
-        Use Gemini OCR to detect section markers (approximate positions)
+        Gemini OCR → approximate bounding boxes (same format as before)
         """
         self.logger.info("🔍 Running Gemini OCR to detect section markers")
 
-        # Convert image to bytes
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG')
         content = img_byte_arr.getvalue()
@@ -104,7 +102,7 @@ Extract ALL visible text from this exam image.
 
         line_height = height / len(lines)
 
-        # Detect keywords line by line
+        # SAME STRUCTURE AS VISION OUTPUT (coords)
         for idx, line in enumerate(lines):
             words = line.split()
 
@@ -117,16 +115,16 @@ Extract ALL visible text from this exam image.
                     section_coords.append((0, y_min, width, y_max))
 
                     self.logger.info(
-                        f"✅ Detected section keyword '{word}' at approx y={y_min}"
+                        f"✅ Detected section keyword '{word}' at {y_min},{y_max}"
                     )
 
-        # Sort top → bottom
+        # SAME SORT
         section_coords.sort(key=lambda coord: coord[1])
 
         self.logger.info(f"📊 Detected {len(section_coords)} section lines")
         return section_coords
 
-    # ---------------- SPLITTING ---------------- #
+    # ---------------- SPLITTING (UNCHANGED) ---------------- #
     def split_image(self, image: Image.Image) -> List[Image.Image]:
         self.logger.info("✂️ Splitting image into sections")
 
@@ -143,8 +141,9 @@ Extract ALL visible text from this exam image.
         y_start = 0
 
         for i, coords in enumerate(line_coords):
-            _, y_min, _, _ = coords
+            x_min, y_min, x_max, y_max = coords
 
+            # EXACT SAME LOGIC
             if i == 0:
                 crop = img_array[y_start:y_min, 0:width]
                 if crop.size != 0:
@@ -156,10 +155,11 @@ Extract ALL visible text from this exam image.
                     sections.append(Image.fromarray(crop))
                 y_start = y_min
 
-        # Last section
+        # LAST SECTION (UNCHANGED)
         crop = img_array[y_start:height, 0:width]
         if crop.size != 0:
             sections.append(Image.fromarray(crop))
+            self.logger.debug(f"Created section from y={y_start} to end")
 
         self.logger.info(f"📦 Total sections created: {len(sections)}")
         return sections

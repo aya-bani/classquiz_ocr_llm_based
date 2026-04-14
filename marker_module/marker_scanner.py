@@ -86,8 +86,13 @@ class ExamScanner:
                 inferred_marker = missing_corner
                 cls.logger.debug(f"Step 5: Inferred corner {missing_corner}")
 
-        # Validate exam/page consistency from real markers
-        dynamic_markers = [m for m in detected_markers if 'inferred' not in m]
+        # Validate exam/page consistency from dynamic (non-fixed) real markers only.
+        # Fixed markers (IDs 0,1,2) intentionally carry dummy exam/page values.
+        first_dynamic = max(MarkerConfig.FIXED_MARKER_IDS) + 1
+        real_markers = [m for m in detected_markers if 'inferred' not in m]
+        dynamic_markers = [m for m in real_markers if m.get('marker_id', -1) >= first_dynamic]
+        fixed_markers = [m for m in real_markers if m.get('marker_id', -1) < first_dynamic]
+
         dynamic_exam_ids = {m['exam_id'] for m in dynamic_markers}
         dynamic_page_numbers = {m['page_number'] for m in dynamic_markers}
 
@@ -109,9 +114,9 @@ class ExamScanner:
             )
 
         if not dynamic_exam_ids or not dynamic_page_numbers:
-            cls.logger.error("No valid exam ID or page number decoded from markers")
+            cls.logger.error("No dynamic marker detected to decode exam/page")
             return cls._create_error_result(
-                "Could not decode valid exam ID or page number from detected markers",
+                "Could not decode valid exam ID or page number from dynamic markers",
                 len(detected_markers),
                 detected_markers
             )
@@ -142,8 +147,8 @@ class ExamScanner:
             'exam_id': exam_id,
             'page_number': page_number,
             'markers_found': len(detected_markers),
-            'dynamic_markers_found': len([m for m in detected_markers if 'inferred' not in m]),
-            'fixed_markers_found': len([m for m in detected_markers if 'inferred' not in m and m.get('marker_id', 0) < 3]),
+            'dynamic_markers_found': len(dynamic_markers),
+            'fixed_markers_found': len(fixed_markers),
             'expected_markers': MarkerConfig.CORNERS_PER_PAGE,
             'detected_markers': detected_markers,
             'paper_corners': paper_corners,

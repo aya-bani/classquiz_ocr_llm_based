@@ -20,17 +20,17 @@ from marker_module.marker_config import MarkerConfig
 
 
 def _stem(p: Path) -> str:
-    m = re.search(r"(\d+)", p.stem)
-    return f"ex{m.group(1)}" if m else "ex0"
+    # Keep the original input stem so each source image gets unique outputs.
+    return p.stem
 
 
 def _resolve_input(project_root: Path) -> Path:
-    base = project_root / "Exams" / "examen_corrige" / "sc" / "s1.jpeg"
+    base = project_root / "Exams" / "examen_corrige" / "sc"
     if len(sys.argv) > 1:
-        c = Path(sys.argv[1])
-        return c if c.is_absolute() else base / c
+        c = Path(sys.argv[1]).expanduser()
+        return c if c.is_absolute() else (project_root / c)
     allowed = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-    imgs = sorted([p for p in base.iterdir() if p.is_file() and p.suffix.lower() in allowed])
+    imgs = sorted([p for p in base.iterdir() if p.is_file() and p.suffix.lower() in allowed]) if base.is_dir() else []
     return imgs[0] if imgs else base / "ex14.jpg"
 
 
@@ -113,7 +113,11 @@ def main() -> int:
         )
     print(f"Raw detections   : {len(detected_markers)} markers")
     print(f"Exam IDs         : {sorted(exam_ids) if exam_ids else 'N/A'}")
-    print(f"Page numbers     : {sorted(page_numbers) if page_numbers else 'N/A'}")
+    if page_numbers:
+        page_number = max(page_numbers) + 1
+        print(f"Page number      : {page_number}")
+    else:
+        print("Page number      : N/A")
 
     # ---- Resolve & validate corners (with quadrant filter) ------------
     try:
@@ -147,14 +151,14 @@ def main() -> int:
 
     # ---- Stage 1: visualisation ---------------------------------------
     vis = build_vis(image, all_corners_img, estimated_names, boundary_pts)
-    p1 = output_dir / f"{stem}_1_mapper_visualisation.jpg"
+    p1 = output_dir / f"{stem}_mapper.jpg"
     cv2.imwrite(str(p1), vis)
     print(f"\nStage 1 -> {p1.name}")
 
     # ---- Stage 2: raw paper crop --------------------------------------
     if boundary_pts is not None:
         crop = build_crop(image, boundary_pts)
-        p2 = output_dir / f"{stem}_2_inside_boundary.jpg"
+        p2 = output_dir / f"{stem}_inside_boundrie.jpg"
         cv2.imwrite(str(p2), crop)
         print(f"Stage 2 -> {p2.name}")
     else:
@@ -165,7 +169,7 @@ def main() -> int:
     if warped is None:
         print("Stage 3 FAILED"); return 1
     dewarped = Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
-    p3 = output_dir / f"{stem}_3_dewarped.jpg"
+    p3 = output_dir / f"{stem}_dewrapped.jpg"
     dewarped.save(p3, quality=95)
     print(f"Stage 3 -> {p3.name}  ({dewarped.width}x{dewarped.height})")
 

@@ -32,8 +32,8 @@ class LayoutConfig:
     CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH"))
     
     # Gemini API for keyword extraction
-    GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")
-    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "models/gemini-2.0-flash")
+    # GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")
+    # GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "models/gemini-2.0-flash")
 
     #openai config for fallback LLM usage
     OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")

@@ -69,12 +69,22 @@ class ImageSplitter:
         )
 
         OCR_PROMPT = """
-Extract ALL visible text from this exam image.
-- Preserve line breaks exactly
-- Do not explain anything
-- Do not summarize
-"""
+Find the exact vertical position (Y coordinate) of every occurrence of these Arabic words in the image:
+- "تعليمة"
+- "سند"
 
+Return ONLY a JSON array with this format, no other text:
+[
+  {"keyword": "تعليمة", "y_position": 123},
+  {"keyword": "سند", "y_position": 456}
+]
+
+Rules:
+- y_position = pixel from top of image (0 = top)
+- Order from top to bottom
+- Return [] if none found
+- Do NOT extract any other text
+"""
         try:
             response = self.client.models.generate_content(
                 model="gemini-3.1-pro-preview",

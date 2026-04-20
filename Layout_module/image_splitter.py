@@ -1,207 +1,172 @@
-import os
-import io
-import numpy as np
+from google.cloud import vision
 from PIL import Image
+import numpy as np
 from typing import List, Tuple
+import io
 from rapidfuzz import fuzz
 from logger_manager import LoggerManager
 from .layout_config import LayoutConfig
-
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
-
-
-load_dotenv()
-
-
 class ImageSplitter:
     """
-    Splits exam images into exercises using Gemini OCR
+    Splits exam images into exercises using OCR to detect section markers
     """
-
+    
     def __init__(self):
+        """
+        Initialize the ImageSplitter with Google Vision API credentials
+        """
         self.logger = LoggerManager.get_logger(__name__)
-
-        GEMINI_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
-
-        if not GEMINI_API_KEY:
-            raise ValueError("❌ GOOGLE_CLOUD_API_KEY not found in .env")
-
-        # ✅ SAME CONFIG
-        self.client = genai.Client(
-            vertexai=True,
-            api_key=GEMINI_API_KEY
+        self.client = vision.ImageAnnotatorClient(
+            client_options={"api_key": LayoutConfig.GOOGLE_API_KEY}
         )
+        self.logger.debug("Google Vision client initialized")
+        self.logger.info("Initialized ImageSplitter and created directories")
 
-        self.logger.info("✅ Gemini OCR client initialized")
-
-    # ---------------- KEYWORD MATCH ---------------- #
     def is_keyword_match(self, word_text: str) -> bool:
-        for keyword in LayoutConfig.KEY_WORDS:
-            similarity = fuzz.ratio(word_text.lower(), keyword.lower())
-
-            if (
-                similarity >= LayoutConfig.SIMILARITY_THRESHOLD
-                and word_text not in LayoutConfig.EXCLUDED_KEYWORDS
-            ):
-                self.logger.debug(
-                    f"Keyword match: '{word_text}' ~ '{keyword}' ({similarity}%)"
-                )
+        """
+        Check if a word matches any keyword using fuzzy matching
+        
+        Args:
+            word_text: The word to check
+            
+        Returns:
+            True if word matches any keyword above threshold, False otherwise
+        """
+        for keyword in LayoutConfig.KEY_WORDS :
+            # Calculate similarity ratio (0-100)
+            similarity = fuzz.ratio(word_text, keyword)
+            if similarity >= LayoutConfig.SIMILARITY_THRESHOLD and word_text not in LayoutConfig.EXCLUDED_KEYWORDS:
+                self.logger.debug(f"Keyword match: '{word_text}' ~ '{keyword}' ({similarity}%)")
                 return True
-
         return False
-
-    # ---------------- OCR + DETECTION ---------------- #
+    
     def detect_section_lines(self, image: Image.Image) -> List[Tuple[int, int, int, int]]:
         """
-        Gemini OCR → approximate bounding boxes (same format as before)
+        Use OCR to detect words containing section markers
+        
+        Args:
+            image: PIL Image object
+            
+        Returns:
+            List of bounding box coordinates (x_min, y_min, x_max, y_max) for detected sections
         """
-        self.logger.info("🔍 Running Gemini OCR to detect section markers")
+        # Convert PIL Image to bytes
+        self.logger.info("Running OCR to detect section markers")
 
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG')
         content = img_byte_arr.getvalue()
-
-        image_part = types.Part.from_bytes(
-            data=content,
-            mime_type="image/jpeg",
-        )
-
-        OCR_PROMPT = """
-Find the exact vertical position (Y coordinate) of every occurrence of these Arabic words in the image:
-- "تعليمة"
-- "سند"
-
-Return ONLY a JSON array with this format, no other text:
-[
-  {"keyword": "تعليمة", "y_position": 123},
-  {"keyword": "سند", "y_position": 456}
-]
-
-Rules:
-- y_position = pixel from top of image (0 = top)
-- Order from top to bottom
-- Return [] if none found
-- Do NOT extract any other text
-"""
-        try:
-            response = self.client.models.generate_content(
-                model="gemini-3.1-pro-preview",
-                contents=[OCR_PROMPT, image_part]
-            )
-
-            text = response.text if response else ""
-
-        except Exception as e:
-            self.logger.error(f"❌ Gemini OCR failed: {e}")
-            return []
-
-        print("\n--------- GEMINI OCR OUTPUT ---------")
-        print(text)
-        print("------------------------------------\n")
-
-        lines = text.split("\n")
+        
+        # Perform OCR
+        vision_image = vision.Image(content=content)
+        response = self.client.document_text_detection(image=vision_image)
+        doc = response.full_text_annotation
+        
         section_coords = []
-
-        height = image.height
-        width = image.width
-
-        if len(lines) == 0:
-            return []
-
-        line_height = height / len(lines)
-
-        # SAME STRUCTURE AS VISION OUTPUT (coords)
-        for idx, line in enumerate(lines):
-            words = line.split()
-
-            for word in words:
-                if self.is_keyword_match(word):
-
-                    y_min = int(idx * line_height)
-                    y_max = int((idx + 1) * line_height)
-
-                    section_coords.append((0, y_min, width, y_max))
-
-                    self.logger.info(
-                        f"✅ Detected section keyword '{word}' at {y_min},{y_max}"
-                    )
-
-        # SAME SORT
+        print("-----------------OCR Response-------------------")
+        # Extract text and bounding boxes at WORD level
+        for page in doc.pages:
+            for block in page.blocks:
+                for paragraph in block.paragraphs:
+                    for word in paragraph.words:
+                        # Build word text from symbols
+                        word_text = ''.join([symbol.text for symbol in word.symbols])
+                        print("-----------------Word detected:-------------------")
+                        print(word_text)
+                        # Check if word matches any section keyword using fuzzy matching
+                        if self.is_keyword_match(word_text):
+                            # Get bounding box coordinates for this word
+                            box = word.bounding_box.vertices
+                            x_min = min(v.x for v in box)
+                            y_min = min(v.y for v in box)
+                            x_max = max(v.x for v in box)
+                            y_max = max(v.y for v in box)
+                            
+                            section_coords.append((x_min, y_min, x_max, y_max))
+                            self.logger.info(f"Detected section keyword '{word_text}' at {x_min},{y_min},{x_max},{y_max}")
+        
+        # Sort by y-coordinate (top to bottom)
         section_coords.sort(key=lambda coord: coord[1])
-
-        self.logger.info(f"📊 Detected {len(section_coords)} section lines")
+        self.logger.info(f"Detected {len(section_coords)} section lines")
         return section_coords
-
-    # ---------------- SPLITTING (UNCHANGED) ---------------- #
+    
     def split_image(self, image: Image.Image) -> List[Image.Image]:
-        self.logger.info("✂️ Splitting image into sections")
+        self.logger.info("Splitting image into sections")
 
+        """
+        Split image into sections based on detected markers
+        
+        Args:
+            image: PIL Image to split
+            
+        Returns:
+            List of PIL Image objects, one for each section
+        """
+        # Detect section lines
         line_coords = self.detect_section_lines(image)
-
+        
         if not line_coords:
-            self.logger.warning("⚠️ No section lines detected; returning full image")
+            # If no sections detected, return the whole image
+            self.logger.warning("No section lines detected; returning full image")
             return [image]
-
+        
+        # Convert PIL Image to numpy array for processing
         img_array = np.array(image)
         height, width = img_array.shape[:2]
-
+        
         sections = []
         y_start = 0
-
+        
         for i, coords in enumerate(line_coords):
             x_min, y_min, x_max, y_max = coords
-
-            # EXACT SAME LOGIC
+            
+            # First slice: from top to the first line's top (exclude first line)
             if i == 0:
                 crop = img_array[y_start:y_min, 0:width]
                 if crop.size != 0:
                     sections.append(Image.fromarray(crop))
+                # Update start to include first line
                 y_start = y_min
             else:
+                # Slice: from previous line's start to current line's top
                 crop = img_array[y_start:y_min, 0:width]
                 if crop.size != 0:
                     sections.append(Image.fromarray(crop))
+                # Update start to include current line
                 y_start = y_min
-
-        # LAST SECTION (UNCHANGED)
+        
+        # Last slice: from the last line's start to the bottom
         crop = img_array[y_start:height, 0:width]
         if crop.size != 0:
             sections.append(Image.fromarray(crop))
-            self.logger.debug(f"Created section from y={y_start} to end")
-
-        self.logger.info(f"📦 Total sections created: {len(sections)}")
+            self.logger.debug(f"Created section {len(sections)} from y={y_start} to y={y_min}")
+        self.logger.info(f"Total sections created: {len(sections)}")
         return sections
-
-    # ---------------- SAVE ---------------- #
-    def split_and_save(
-        self,
-        image: Image.Image,
-        exam_id: int,
-        submission_id: int = None
-    ):
-        self.logger.info("🚀 Starting split_and_save")
-
+    
+    def split_and_save(self, image: Image.Image, exam_id: int, submission_id:int = None) -> List[str]:
+        """
+        Split image and save sections to disk
+        
+        Args:
+            image: PIL Image to split
+            output_prefix: Prefix for saved image files
+            
+        Returns:
+            List of saved file paths
+        """
+        self.logger.info("Starting split_and_save")
         sections = self.split_image(image)
-
+        
         if submission_id is not None:
             output_prefix = f"exam_{exam_id}_submission_{submission_id}"
             directory = LayoutConfig.RAW_SUBMISSIONS_PATH / output_prefix
         else:
             output_prefix = f"exam_{exam_id}"
             directory = LayoutConfig.RAW_EXAMS_PATH / output_prefix
-
         directory.mkdir(parents=True, exist_ok=True)
-
         for i, section in enumerate(sections):
             filepath = directory / f"{output_prefix}_section_{i}.jpg"
             section.save(filepath, "JPEG")
-            self.logger.info(f"💾 Saved section {i} to {filepath}")
-
-        self.logger.info("✅ Finished split_and_save")
-
-        return {
-            'sections_dir': directory,
-            'number_of_sections': len(sections)
-        }
+            self.logger.info(f"Saved section {i} to {filepath}")
+        self.logger.info("Finished split_and_save")
+        return {'sections_dir': directory, 'number_of_sections': len(sections)}

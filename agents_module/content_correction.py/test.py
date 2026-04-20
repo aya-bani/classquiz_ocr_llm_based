@@ -216,6 +216,89 @@ def _diagram_parts_lookup(question_content: Dict[str, Any]) -> Dict[str, str]:
     return lookup
 
 
+def _extract_start_coordinate(text: str) -> Optional[tuple[int, str]]:
+    if not text:
+        return None
+    match = re.search(r"(\d+)\s*[,،]\s*([\u0621-\u064A])", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1)), match.group(2)
+    except Exception:
+        return None
+
+
+def _extract_direction_tokens(question_text: str) -> List[str]:
+    if not question_text:
+        return []
+    return re.findall(r"[\u2190\u2191\u2192\u2193]", question_text)
+
+
+def _next_arabic_letter(letter: str, step: int) -> str:
+    letters = [
+        "ا", "أ", "ب", "ج", "د", "ه", "و", "ز", "ح", "ط", "ي", "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق", "ر", "ش", "ت", "ث", "خ", "ذ", "ض", "ظ", "غ",
+    ]
+    normalized = "ا" if letter == "أ" else letter
+    if normalized not in letters:
+        return letter
+    idx = letters.index(normalized)
+    new_idx = max(0, min(len(letters) - 1, idx + step))
+    return letters[new_idx]
+
+
+def _build_grid_path_answer(raw_text: str, question_content: Dict[str, Any]) -> Optional[str]:
+    question_text = str(question_content.get("question_text", ""))
+    diagram_description = str(question_content.get("diagram_description", ""))
+
+    start = (
+        _extract_start_coordinate(raw_text)
+        or _extract_start_coordinate(diagram_description)
+        or _extract_start_coordinate(question_text)
+    )
+    if not start:
+        return None
+
+    arrows = _extract_direction_tokens(question_text)
+    if not arrows:
+        return None
+
+    x, y = start
+    points = [(x, y)]
+
+    combined_text = f"{question_text} {diagram_description}"
+    combined_norm = _normalize_text(combined_text)
+
+    # Infer horizontal orientation dynamically from axis wording/number order.
+    explicit_rtl = (
+        "من اليمين الى اليسار" in combined_norm
+        or "from right to left" in combined_norm
+    )
+    rtl_horizontal = explicit_rtl
+
+    range_match = re.search(r"(\d+)\s*(?:to|الى|إلى|->|→|-)\s*(\d+)", combined_text)
+    if range_match and not explicit_rtl:
+        try:
+            left_val = int(range_match.group(1))
+            right_val = int(range_match.group(2))
+            # Example: 8 to 0 means values decrease when moving right.
+            rtl_horizontal = left_val > right_val
+        except Exception:
+            pass
+
+    for arrow in arrows:
+        if arrow == "↑":
+            y = _next_arabic_letter(y, 1)
+        elif arrow == "↓":
+            y = _next_arabic_letter(y, -1)
+        elif arrow == "→":
+            x = x - 1 if rtl_horizontal else x + 1
+        elif arrow == "←":
+            x = x + 1 if rtl_horizontal else x - 1
+        points.append((x, y))
+
+    return " -> ".join(f"({px},{py})" for px, py in points)
+
+
 def _extract_diagram_selected_parts(
     raw_text: str,
     question_content: Dict[str, Any],
@@ -299,6 +382,10 @@ def _build_structured_answer(
         answer["matches"] = _extract_relating_matches(raw_text, question_content)
 
     if normalized_type == "DIAGRAM":
+        dynamic_path = _build_grid_path_answer(raw_text, question_content)
+        if dynamic_path:
+            answer["raw_text"] = dynamic_path
+
         question_text_norm = _normalize_text(str(question_content.get("question_text", "")))
         if "اسميهما" in question_text_norm:
             answer_lines = [

@@ -27,17 +27,15 @@ class LayoutConfig:
 
 
     # OCR and keyword matching
-    # GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    GOOGLE_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY")
-    CREDENTIALS_PATH = Path(os.getenv("GOOGLE_CREDENTIALS_PATH"))
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY_VISION")
     
-    # Gemini API for keyword extraction
+    # # Gemini API for keyword extraction
     # GEMINI_API_KEY = os.getenv("GEMINI_AI_API_KEY")
     # GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "models/gemini-2.0-flash")
 
-    #openai config for fallback LLM usage
-    OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
+    # #openai config for fallback LLM usage
+    # OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
+    # OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
 
     SIMILARITY_THRESHOLD = 70
     KEY_WORDS = ["تعليمة", "سند"]

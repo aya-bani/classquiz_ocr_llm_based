@@ -351,10 +351,21 @@ def build_unified_content(
 
     question_type = classification.get("question_type", "UNKNOWN")
     confidence = float(classification.get("confidence", 0.0))
-    question_content = dict(question_block.get("content", {}))
+    raw_question_content = (
+        question_block.get("content", {})
+        if isinstance(question_block, dict)
+        else {}
+    )
+    if isinstance(raw_question_content, dict):
+        question_content: Dict[str, Any] = dict(raw_question_content)
+    elif isinstance(raw_question_content, list):
+        question_content = {"questions": raw_question_content}
+    else:
+        question_content = {}
 
-    question_content.pop("student_answer", None)
-    question_content.pop("correct_answer", None)
+    if isinstance(question_content, dict):
+        question_content.pop("student_answer", None)
+        question_content.pop("correct_answer", None)
 
     mode_info = _infer_is_submission(image_path, manual_flag)
     is_submission = bool(mode_info["is_submission"])

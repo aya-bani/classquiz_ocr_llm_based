@@ -25,9 +25,7 @@ class LayoutConfig:
     FIRST_PAGE_CORRECTION_OFFSET = 450
     FIRST_PAGE_OFFSET = 560
 
-    # layout_config.py - add this
-    MAX_NUMBER_POSITION_RATIO = 0.3  # number must be in first 30% of line width (left side)
-                                  # or last 30% (right side for Arabic)
+
     # OCR and keyword matching
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY_VISION")
     
@@ -39,24 +37,9 @@ class LayoutConfig:
     # OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
     # OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
 
-    # SIMILARITY_THRESHOLD = 70
-    # KEY_WORDS = ["تعليمة", "سند"]
-    # EXCLUDED_KEYWORDS = ["تسند"]
-    # layout_config.py - updated section
-
     SIMILARITY_THRESHOLD = 70
-    KEY_WORDS = ["تعليمة", "السند"]
+    KEY_WORDS = [ "سند"]
     EXCLUDED_KEYWORDS = ["تسند"]
-
-    # Section number patterns - ONLY valid as section starters
-    SECTION_NUMBER_PATTERNS = [
-    r"^-\d+$",        # -1 -2 -3  (dash BEFORE)
-    r"^\d+-$",        # 1- 2- 3-  (dash AFTER)  ← THIS WAS MISSING
-    r"^\d+\.$",       # 1. 2. 3.
-    r"^\d+/$",        # 1/ 2/ 3/  (sometimes used in Arabic exams)
-    ]
-
-    LINE_Y_TOLERANCE = 20  # px — words within this vertical distance = same line
 
     @classmethod
     def validate(cls):

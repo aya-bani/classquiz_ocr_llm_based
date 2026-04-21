@@ -1,40 +1,46 @@
 from pathlib import Path
 from PIL import Image
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from Layout_module.image_splitter import ImageSplitter
 import shutil
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from Layout_module.image_splitter import ImageSplitter
 
 
 def main():
-    # input image from the Exams folder
     project_root = Path(__file__).resolve().parents[2]
-    if len(sys.argv) > 1:
-        input_path = Path(sys.argv[1]).expanduser()
-        img_file = input_path if input_path.is_absolute() else (project_root / input_path)
-    else:
-        img_file = project_root / "Exams" / "croped_corrections" / "exam_pdf_cropped.jpg"
-    if not img_file.exists():
-        raise FileNotFoundError(f"Expected test image not found: {img_file}")
 
-    splitter = ImageSplitter()
+    # ✅ input from terminal OR default
+    img_file = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else project_root / "Exams" / "croped_corrections" / "exam_pdf_cropped.jpg"
+    )
+
+    # make absolute if relative
+    img_file = img_file if img_file.is_absolute() else project_root / img_file
+
+    if not img_file.exists():
+        raise FileNotFoundError(f"Image not found: {img_file}")
+
     image = Image.open(img_file)
 
-    # run the splitter (use a dummy exam_id)
+    splitter = ImageSplitter()
     result = splitter.split_and_save(image, exam_id=1)
 
-    # move the generated directory to the requested output location
-    dest_root = project_root / "Exams" / "sections_sp"
-    dest_root.mkdir(parents=True, exist_ok=True)
+    output_dir = img_file.parent / "sections_output"
+    output_dir.mkdir(exist_ok=True)
 
-    src_dir = Path(result["sections_dir"])
-    dest_dir = dest_root / src_dir.name
+    src = Path(result["sections_dir"])
+    dst = output_dir / src.name
 
-    if dest_dir.exists():
-        shutil.rmtree(dest_dir)
-    shutil.move(str(src_dir), str(dest_dir))
+    if dst.exists():
+        shutil.rmtree(dst)
 
-    print(f"Sections written to {dest_dir}")
+    shutil.move(str(src), str(dst))
+
+    print(f"Sections saved to: {dst}")
 
 
 if __name__ == "__main__":
